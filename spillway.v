@@ -1279,13 +1279,21 @@ Section ProportionalCertified.
   Hypothesis capacity_sufficient_prop : forall t, worst_case_inflow t <= gate_capacity_cm pc.
   Hypothesis inflow_below_margin : forall t, worst_case_inflow t <= margin_cm.
 
+  Variable max_inflow_cm_prop : nat.
+  Hypothesis max_inflow_bounds_prop : forall t, worst_case_inflow t <= max_inflow_cm_prop.
+
+  Variable min_gate_pct_prop : nat.
+  Hypothesis min_gate_bounded_prop : min_gate_pct_prop <= 100.
+  Hypothesis min_gate_sufficient_prop : gate_capacity_cm pc * min_gate_pct_prop / 100 >= max_inflow_cm_prop.
+
   Definition control_prop (s : State) (_ : nat) : nat :=
     let error := reservoir_level_cm s - setpoint_cm in
     let raw_cmd := Kp * error in
     let clamped := Nat.min 100 raw_cmd in
     let current := gate_open_pct s in
     let slew_up := Nat.min clamped (current + actual_slew_pct) in
-    Nat.max slew_up (current - actual_slew_pct).
+    let slew_down := Nat.max slew_up (current - actual_slew_pct) in
+    Nat.max min_gate_pct_prop slew_down.
 
   Lemma control_prop_within : forall s t, gate_ok s -> control_prop s t <= 100.
   Proof.
@@ -1293,26 +1301,45 @@ Section ProportionalCertified.
     unfold control_prop, gate_ok in *.
     set (clamped := Nat.min 100 (Kp * (reservoir_level_cm s - setpoint_cm))).
     set (slew_up := Nat.min clamped (gate_open_pct s + actual_slew_pct)).
-    destruct (Nat.le_ge_cases slew_up (gate_open_pct s - actual_slew_pct)) as [Hcase|Hcase].
-    - rewrite (Nat.max_r _ _ Hcase). lia.
-    - rewrite (Nat.max_l _ _ Hcase).
-      eapply Nat.le_trans.
-      + apply Nat.le_min_l.
-      + apply Nat.le_min_l.
+    set (slew_down := Nat.max slew_up (gate_open_pct s - actual_slew_pct)).
+    apply Nat.max_lub.
+    - exact min_gate_bounded_prop.
+    - destruct (Nat.le_ge_cases slew_up (gate_open_pct s - actual_slew_pct)) as [Hcase|Hcase].
+      + unfold slew_down.
+        rewrite (Nat.max_r _ _ Hcase).
+        lia.
+      + unfold slew_down.
+        rewrite (Nat.max_l _ _ Hcase).
+        eapply Nat.le_trans.
+        * apply Nat.le_min_l.
+        * apply Nat.le_min_l.
+  Qed.
+
+  Lemma control_prop_ge_min : forall s t, control_prop s t >= min_gate_pct_prop.
+  Proof.
+    intros s t.
+    unfold control_prop.
+    apply Nat.le_max_l.
   Qed.
 
   Lemma control_prop_slew : forall s t,
     gate_ok s ->
-    control_prop s t <= gate_open_pct s + actual_slew_pct /\
+    control_prop s t <= gate_open_pct s + actual_slew_pct + min_gate_pct_prop /\
     gate_open_pct s <= control_prop s t + actual_slew_pct.
   Proof.
     intros s t Hok.
     unfold control_prop.
     split.
     - apply Nat.max_lub.
-      + apply Nat.le_min_r.
       + lia.
-    - apply Nat.max_case_strong; intros; lia.
+      + apply Nat.max_lub.
+        * apply Nat.le_trans with (m := gate_open_pct s + actual_slew_pct).
+          { apply Nat.le_min_r. }
+          { lia. }
+        * lia.
+    - apply Nat.max_case_strong; intros.
+      + pose proof min_gate_bounded_prop. lia.
+      + apply Nat.max_case_strong; intros; lia.
   Qed.
 
   Definition threshold_prop : nat := max_reservoir_cm pc - margin_cm.
@@ -1381,11 +1408,48 @@ Section ProportionalCertified.
     safe s /\ gate_ok s /\
     (reservoir_level_cm s >= threshold_prop -> gate_open_pct s + actual_slew_pct >= 100).
 
-  (** Level cannot jump from below threshold to above in one step. *)
-  Hypothesis no_threshold_crossing_prop :
+  (** Outflow is at least worst-case inflow when gate is at min_gate or above. *)
+  Lemma outflow_ge_inflow_prop : forall (st : State) (tstep : nat),
+    gate_ok st ->
+    outflow worst_case_inflow control_prop st tstep >= worst_case_inflow tstep.
+  Proof.
+    intros st tstep Hok.
+    unfold outflow, available_water.
+    apply Nat.min_glb.
+    - pose proof (control_prop_ge_min st tstep) as Hge.
+      assert (Hcap : gate_capacity_cm pc * control_prop st tstep / 100
+                     >= gate_capacity_cm pc * min_gate_pct_prop / 100).
+      { apply Nat.Div0.div_le_mono. apply Nat.mul_le_mono_l. exact Hge. }
+      pose proof min_gate_sufficient_prop.
+      pose proof (max_inflow_bounds_prop tstep).
+      lia.
+    - lia.
+  Qed.
+
+  (** Level cannot rise when below threshold since outflow >= inflow. *)
+  Lemma level_nonincreasing_below_threshold_prop : forall (st : State) (tstep : nat),
+    gate_ok st ->
+    reservoir_level_cm st < threshold_prop ->
+    reservoir_level_cm (step worst_case_inflow control_prop st tstep) <= reservoir_level_cm st.
+  Proof.
+    intros st tstep Hok Hbelow.
+    unfold step.
+    simpl.
+    pose proof (@outflow_ge_inflow_prop st tstep Hok) as Hge.
+    lia.
+  Qed.
+
+  (** Derived: Level cannot jump from below threshold to above in one step. *)
+  Lemma no_threshold_crossing_prop :
     forall s t,
+      gate_ok s ->
       reservoir_level_cm s < threshold_prop ->
       reservoir_level_cm (step worst_case_inflow control_prop s t) < threshold_prop.
+  Proof.
+    intros s t Hok Hbelow.
+    pose proof (@level_nonincreasing_below_threshold_prop s t Hok Hbelow) as Hle.
+    lia.
+  Qed.
 
   Lemma reservoir_preserved_prop :
     forall s t, adequate_prop s ->
@@ -1419,9 +1483,11 @@ Section ProportionalCertified.
         assert (Hslew_up_100 : Nat.min 100 (gate_open_pct s + actual_slew_pct) = 100)
           by (apply Nat.min_l; lia).
         rewrite Hslew_up_100.
-        apply Nat.max_l.
-        unfold gate_ok in Hgate.
-        lia. }
+        assert (Hinner_100 : Nat.max 100 (gate_open_pct s - actual_slew_pct) = 100).
+        { apply Nat.max_l. unfold gate_ok in Hgate. lia. }
+        rewrite Hinner_100.
+        apply Nat.max_r.
+        exact min_gate_bounded_prop. }
       subst cmd.
       unfold cap.
       rewrite Hcmd_100.
@@ -1485,7 +1551,8 @@ Section ProportionalCertified.
       unfold control_prop.
       destruct (Nat.lt_ge_cases (reservoir_level_cm s) threshold_prop) as [Hlow|Hhigh].
       + exfalso.
-        assert (Hnocross := no_threshold_crossing_prop s t Hlow).
+        assert (Hnocross : reservoir_level_cm (step worst_case_inflow control_prop s t) < threshold_prop).
+        { apply no_threshold_crossing_prop; [exact Hgate | exact Hlow]. }
         unfold step in Hnocross.
         simpl in Hnocross.
         lia.
@@ -2091,7 +2158,14 @@ Section SignedFlow.
     forall s, safe_z s ->
       z_downstream_cm s = stage_from_outflow_z (prior_outflow_z s).
 
-  (** Outflow change is bounded by gate slew. *)
+  (** Prior outflow was capacity-limited (not availability-limited).
+      This relates prior_outflow to the current gate position. *)
+  Hypothesis prior_outflow_capacity_limited :
+    forall s, prior_outflow_z s = z_gate_capacity_cm * z_gate_pct s / 100.
+
+  (** Outflow change is bounded by gate slew.
+      This follows from prior_outflow_capacity_limited and control_slew_limited_z,
+      accounting for integer division rounding. *)
   Hypothesis outflow_change_bounded :
     forall s t, safe_z s -> gate_ok_z s ->
       Z.abs (outflow_z control_z s t - prior_outflow_z s) <= max_outflow_change_z.
