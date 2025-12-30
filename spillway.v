@@ -36,7 +36,7 @@ Record PlantConfig
   := mkPlantConfig {
   max_reservoir_cm : nat;
   max_downstream_cm : nat;
-  gate_capacity_cms : nat;
+  gate_capacity_cm : nat;
   forecast_error_pct : nat;
   gate_slew_pct : nat;
   max_stage_rise_cm : nat;
@@ -44,7 +44,7 @@ Record PlantConfig
   timestep_s : nat;
   pc_max_reservoir_pos : max_reservoir_cm > 0;
   pc_max_downstream_pos : max_downstream_cm > 0;
-  pc_gate_capacity_pos : gate_capacity_cms > 0;
+  pc_gate_capacity_pos : gate_capacity_cm > 0;
   pc_reservoir_area_pos : reservoir_area_cm2 > 0;
   pc_timestep_pos : timestep_s > 0
 }.
@@ -56,7 +56,7 @@ Coercion reservoir_level_cm : State >-> nat.
 
     IMPORTANT: This model uses a dimensionally consistent approach where:
     - All inflow values (worst_case_inflow, inflow_forecast) are in LEVEL UNITS (cm)
-    - All capacity values (gate_capacity_cms) are in LEVEL UNITS (cm per timestep)
+    - All capacity values (gate_capacity_cm) are in LEVEL UNITS (cm per timestep)
     - The outflow function directly computes level changes without conversion
 
     This means that before using the model, physical quantities must be converted:
@@ -203,6 +203,20 @@ Section WithPlantConfig.
     lia.
   Qed.
 
+  (** Constant error function: always returns base forecast error.
+      This is the simplest valid instantiation of forecast_error_pct_t. *)
+  Definition constant_error_pct (_ : nat) : nat := forecast_error_pct pc.
+
+  (** Constant error trivially satisfies the error bound hypothesis.
+      This proves forecast_error_pct_t_bound is satisfiable. *)
+  Lemma constant_error_satisfies_bound :
+    forall t, constant_error_pct t <= 2 * forecast_error_pct pc.
+  Proof.
+    intro t.
+    unfold constant_error_pct.
+    lia.
+  Qed.
+
   (** Available storage plus inflow from a provided inflow function. *)
   Definition available_water (inflow : nat -> nat) (s : State) (t : nat)
     : nat
@@ -211,7 +225,7 @@ Section WithPlantConfig.
   (** Released discharge as level change (cm), limited by capacity and availability. *)
   Definition outflow (inflow : nat -> nat) (ctrl : State -> nat -> nat) (s : State) (t : nat)
     : nat
-    := Nat.min (gate_capacity_cms pc * ctrl s t / 100) (available_water inflow s t).
+    := Nat.min (gate_capacity_cm pc * ctrl s t / 100) (available_water inflow s t).
 
   (** Outflow never exceeds available water (ensures no underflow in step). *)
   Lemma outflow_le_available
@@ -335,6 +349,39 @@ Fixpoint monotone_table (tbl:RatingTable) : Prop :=
 (** All table stage values are bounded by a given limit. *)
 Definition table_stages_bounded (tbl:RatingTable) (bound:nat) : Prop :=
   Forall (fun qs => snd qs <= bound) tbl.
+
+(** Bundled monotone rating table - structural enforcement.
+    Using MonotoneRatingTable instead of raw RatingTable ensures
+    monotonicity is guaranteed at construction time. *)
+Record MonotoneRatingTable := mkMonotoneTable {
+  mrt_table : RatingTable;
+  mrt_monotone : monotone_table mrt_table
+}.
+
+(** Coercion to use MonotoneRatingTable where RatingTable expected. *)
+Coercion mrt_table : MonotoneRatingTable >-> RatingTable.
+
+(** Example: building a valid monotone table.
+    The monotonicity proof is discharged at construction. *)
+Definition example_monotone_table : MonotoneRatingTable.
+Proof.
+  refine (mkMonotoneTable [(10, 5); (20, 10); (50, 25)] _).
+  vm_compute. repeat split; lia.
+Defined.
+
+(** Example: another monotone table with more points. *)
+Definition example_monotone_table2 : MonotoneRatingTable.
+Proof.
+  refine (mkMonotoneTable [(5, 2); (10, 5); (20, 10); (50, 25); (100, 50)] _).
+  vm_compute. repeat split; lia.
+Defined.
+
+(** Monotonicity is preserved by the bundled type. *)
+Lemma monotone_table_from_bundle : forall mrt,
+  monotone_table (mrt_table mrt).
+Proof.
+  intro mrt. exact (mrt_monotone mrt).
+Qed.
 
 (** Max is monotone in its right argument. *)
 Lemma Nat_max_mono_r : forall s a b, a <= b -> Nat.max s a <= Nat.max s b.
@@ -619,10 +666,6 @@ Section ConcreteCertified.
   Hypothesis inflow_below_margin
     : forall t, worst_case_inflow t <= margin_cm.
 
-  (** Gate capacity can pass worst-case inflow. *)
-  Hypothesis capacity_sufficient
-    : forall t, worst_case_inflow t <= gate_capacity_cms pc.
-
   (** Slew rate is positive and realistic. *)
   Hypothesis slew_pos
     : gate_slew_pct pc > 0.
@@ -639,6 +682,20 @@ Section ConcreteCertified.
   Hypothesis max_inflow_bounds
     : forall t, worst_case_inflow t <= max_inflow_cm.
 
+  (** Gate capacity sized to handle maximum inflow. *)
+  Hypothesis capacity_exceeds_max_inflow
+    : max_inflow_cm <= gate_capacity_cm pc.
+
+  (** Derived: Gate capacity can pass any worst-case inflow. *)
+  Lemma capacity_sufficient
+    : forall t, worst_case_inflow t <= gate_capacity_cm pc.
+  Proof.
+    intro t.
+    eapply Nat.le_trans.
+    - apply max_inflow_bounds.
+    - exact capacity_exceeds_max_inflow.
+  Qed.
+
   (** Margin is large enough to absorb inflow during gate ramp-up time.
       This ensures safety even when starting from 0% gate opening. *)
   Hypothesis margin_covers_ramp
@@ -648,18 +705,18 @@ Section ConcreteCertified.
   Hypothesis stage_model
     : forall out,
         stage_from_outflow out =
-        base_tailwater_cm + stage_gain_cm_per_cms * Nat.min out (gate_capacity_cms pc).
+        base_tailwater_cm + stage_gain_cm_per_cms * Nat.min out (gate_capacity_cm pc).
 
   (** Stage at full capacity is below downstream ceiling. *)
   Hypothesis stage_gain_capacity_bound
-    : base_tailwater_cm + stage_gain_cm_per_cms * gate_capacity_cms pc <= max_downstream_cm pc.
+    : base_tailwater_cm + stage_gain_cm_per_cms * gate_capacity_cm pc <= max_downstream_cm pc.
 
   (** Maximum stage change from zero to full outflow.
       This is the maximum change in downstream stage that can occur in one step,
       determined by the hydraulic model. *)
   Definition max_stage_change
     : nat
-    := stage_gain_cm_per_cms * gate_capacity_cms pc.
+    := stage_gain_cm_per_cms * gate_capacity_cm pc.
 
   (** Per-step ramp allowance covers the maximum hydraulic stage change.
       This ensures that rapid gate movements don't cause excessive downstream flooding. *)
@@ -682,6 +739,29 @@ Section ConcreteCertified.
     : nat
     := stage_gain_cm_per_cms * out.
 
+  (** Minimum gate opening to ensure outflow >= inflow even when below threshold.
+      This prevents unchecked level rise. Must satisfy:
+        gate_capacity_cm pc * min_gate_pct / 100 >= max_inflow_cm *)
+  Variable min_gate_pct : nat.
+
+  (** Minimum gate is within valid range. *)
+  Hypothesis min_gate_bounded
+    : min_gate_pct <= 100.
+
+  (** Minimum gate ensures sufficient outflow to match worst-case inflow. *)
+  Hypothesis min_gate_sufficient
+    : gate_capacity_cm pc * min_gate_pct / 100 >= max_inflow_cm.
+
+  (** Minimum gate is at most the slew rate, ensuring upward slew compliance.
+      From any gate position, we can always reach min_gate respecting slew. *)
+  Hypothesis min_gate_le_slew
+    : min_gate_pct <= gate_slew_pct pc.
+
+  (** Slew can reach min_gate from 100%, ensuring downward slew compliance.
+      100% gate can decrease to min_gate within one slew step. *)
+  Hypothesis slew_reaches_min_gate
+    : min_gate_pct + gate_slew_pct pc >= 100.
+
   (** Extended validity: safe, gate bounded, AND gate position adequate.
       When above threshold, gate must be at 100% to ensure sufficient discharge. *)
   Definition adequate (s : State)
@@ -690,12 +770,13 @@ Section ConcreteCertified.
        (reservoir_level_cm s >= threshold_cm -> gate_open_pct s = 100).
 
   (** Slew-aware controller: increases gate toward 100% when above threshold,
-      respecting slew rate limits. Decreases toward 0% when below threshold. *)
+      respecting slew rate limits. Decreases toward min_gate_pct when below threshold.
+      This ensures outflow always covers worst-case inflow. *)
   Definition control_concrete (s : State) (_ : nat)
     : nat
     := if Nat.leb threshold_cm (reservoir_level_cm s)
        then Nat.min 100 (gate_open_pct s + gate_slew_pct pc)
-       else gate_open_pct s - Nat.min (gate_open_pct s) (gate_slew_pct pc).
+       else Nat.max min_gate_pct (gate_open_pct s - Nat.min (gate_open_pct s) (gate_slew_pct pc)).
 
   (** Controller output is bounded by 100%. *)
   Lemma control_concrete_within : forall s t, gate_ok s -> control_concrete s t <= 100.
@@ -704,9 +785,9 @@ Section ConcreteCertified.
     unfold control_concrete, gate_ok in *.
     destruct (Nat.leb threshold_cm (reservoir_level_cm s)).
     - apply Nat.le_min_l.
-    - assert (Hsub : gate_open_pct s - Nat.min (gate_open_pct s) (gate_slew_pct pc) <= gate_open_pct s)
-        by lia.
-      lia.
+    - apply Nat.max_case_strong; intros.
+      + exact min_gate_bounded.
+      + lia.
   Qed.
 
   (** Controller respects slew constraints relative to current gate. *)
@@ -726,8 +807,12 @@ Section ConcreteCertified.
         * rewrite Nat.min_l by lia.
           lia.
     - split.
-      + lia.
-      + lia.
+      + apply Nat.max_case_strong; intros.
+        * pose proof min_gate_le_slew. lia.
+        * lia.
+      + apply Nat.max_case_strong; intros.
+        * pose proof slew_reaches_min_gate. lia.
+        * lia.
   Qed.
 
   (** Mass balance: storage + inflow stays within crest + discharge.
@@ -753,12 +838,12 @@ Section ConcreteCertified.
       rewrite Hctrl_100.
       assert (Hcap := capacity_sufficient t).
       apply Nat.min_case_strong; intro Hcmp.
-      + assert (Hdiv : gate_capacity_cms pc * 100 / 100 = gate_capacity_cms pc)
+      + assert (Hdiv : gate_capacity_cm pc * 100 / 100 = gate_capacity_cm pc)
           by (apply Nat.div_mul; discriminate).
         rewrite Hdiv.
-        assert (Hstep1 : reservoir_level_cm s + worst_case_inflow t <= reservoir_level_cm s + gate_capacity_cms pc)
+        assert (Hstep1 : reservoir_level_cm s + worst_case_inflow t <= reservoir_level_cm s + gate_capacity_cm pc)
           by (apply Nat.add_le_mono_l; exact Hcap).
-        assert (Hstep2 : reservoir_level_cm s + gate_capacity_cms pc <= max_reservoir_cm pc + gate_capacity_cms pc)
+        assert (Hstep2 : reservoir_level_cm s + gate_capacity_cm pc <= max_reservoir_cm pc + gate_capacity_cm pc)
           by (apply Nat.add_le_mono_r; exact Hres).
         lia.
       + lia.
@@ -788,14 +873,14 @@ Section ConcreteCertified.
     forall out, stage_from_outflow out <= max_downstream_cm pc.
   Proof.
     intros out. rewrite stage_model.
-    assert (Hmul : stage_gain_cm_per_cms * Nat.min out (gate_capacity_cms pc)
-                   <= stage_gain_cm_per_cms * gate_capacity_cms pc).
-    { replace (stage_gain_cm_per_cms * Nat.min out (gate_capacity_cms pc))
-        with (Nat.min out (gate_capacity_cms pc) * stage_gain_cm_per_cms) by lia.
-      replace (stage_gain_cm_per_cms * gate_capacity_cms pc)
-        with (gate_capacity_cms pc * stage_gain_cm_per_cms) by lia.
+    assert (Hmul : stage_gain_cm_per_cms * Nat.min out (gate_capacity_cm pc)
+                   <= stage_gain_cm_per_cms * gate_capacity_cm pc).
+    { replace (stage_gain_cm_per_cms * Nat.min out (gate_capacity_cm pc))
+        with (Nat.min out (gate_capacity_cm pc) * stage_gain_cm_per_cms) by lia.
+      replace (stage_gain_cm_per_cms * gate_capacity_cm pc)
+        with (gate_capacity_cm pc * stage_gain_cm_per_cms) by lia.
       apply Nat.mul_le_mono; try lia; apply Nat.min_glb_r. }
-    apply Nat.le_trans with (m := base_tailwater_cm + stage_gain_cm_per_cms * gate_capacity_cms pc).
+    apply Nat.le_trans with (m := base_tailwater_cm + stage_gain_cm_per_cms * gate_capacity_cm pc).
     - apply Nat.add_le_mono_l. exact Hmul.
     - exact stage_gain_capacity_bound.
   Qed.
@@ -882,14 +967,59 @@ Qed.
     exact Hok.
   Qed.
 
-  (** Additional constraint: inflow is bounded such that level cannot jump
-      from below threshold to above threshold in one step. This ensures the
-      controller has time to ramp up the gate before reaching critical levels.
-      Formally: if level < threshold, then level + inflow - outflow < threshold. *)
-  Hypothesis no_threshold_crossing
-    : forall s t,
-        reservoir_level_cm s < threshold_cm ->
-        reservoir_level_cm (step worst_case_inflow control_concrete s t) < threshold_cm.
+  (** Helper: control_concrete always returns at least min_gate_pct. *)
+  Lemma control_concrete_ge_min : forall s t,
+    control_concrete s t >= min_gate_pct.
+  Proof.
+    intros s t.
+    unfold control_concrete.
+    destruct (Nat.leb threshold_cm (reservoir_level_cm s)).
+    - pose proof min_gate_bounded. lia.
+    - apply Nat.le_max_l.
+  Qed.
+
+  (** Helper: outflow is at least worst-case inflow when gate >= min_gate_pct. *)
+  Lemma outflow_ge_inflow : forall (st : State) (tstep : nat),
+    gate_ok st ->
+    outflow worst_case_inflow control_concrete st tstep >= worst_case_inflow tstep.
+  Proof.
+    intros st tstep Hok.
+    unfold outflow, available_water.
+    apply Nat.min_glb.
+    - pose proof (control_concrete_ge_min st tstep) as Hge.
+      assert (Hcap : gate_capacity_cm pc * control_concrete st tstep / 100
+                     >= gate_capacity_cm pc * min_gate_pct / 100).
+      { apply Nat.Div0.div_le_mono. apply Nat.mul_le_mono_l. exact Hge. }
+      pose proof min_gate_sufficient.
+      pose proof (max_inflow_bounds tstep).
+      lia.
+    - lia.
+  Qed.
+
+  (** Derived: Level cannot rise when below threshold.
+      Since outflow >= inflow, the reservoir level decreases or stays same. *)
+  Lemma level_nonincreasing_below_threshold : forall (st : State) (tstep : nat),
+    gate_ok st ->
+    reservoir_level_cm st < threshold_cm ->
+    reservoir_level_cm (step worst_case_inflow control_concrete st tstep) <= reservoir_level_cm st.
+  Proof.
+    intros st tstep Hok Hbelow.
+    unfold step. simpl.
+    pose proof (@outflow_ge_inflow st tstep Hok) as Hge.
+    lia.
+  Qed.
+
+  (** Derived: Level cannot jump from below threshold to above in one step.
+      This follows from level_nonincreasing_below_threshold. *)
+  Lemma no_threshold_crossing : forall (st : State) (tstep : nat),
+    gate_ok st ->
+    reservoir_level_cm st < threshold_cm ->
+    reservoir_level_cm (step worst_case_inflow control_concrete st tstep) < threshold_cm.
+  Proof.
+    intros st tstep Hok Hbelow.
+    pose proof (@level_nonincreasing_below_threshold st tstep Hok Hbelow) as Hle.
+    lia.
+  Qed.
 
   (** Controller maintains adequacy invariant: after a step from an adequate state,
       the new state is also adequate. *)
@@ -921,15 +1051,14 @@ Qed.
       + apply Nat.leb_gt in Hbranch.
         exfalso.
         unfold threshold_cm in Hbranch.
-        assert (Hnocross := no_threshold_crossing s t).
-        unfold threshold_cm in Hnocross.
-        apply Hnocross in Hbranch.
-        unfold step in Hbranch.
-        simpl in Hbranch.
-        unfold step in Hlevel.
-        simpl in Hlevel.
-        unfold threshold_cm in Hlevel.
-        lia.
+        pose proof (@no_threshold_crossing s t Hok Hbranch) as Hnocross.
+        unfold threshold_cm in Hnocross, Hlevel.
+        unfold step in Hnocross, Hlevel.
+        simpl in Hnocross, Hlevel.
+        apply Nat.lt_irrefl with (x := max_reservoir_cm pc - margin_cm).
+        apply Nat.le_lt_trans with (m := reservoir_level_cm s + worst_case_inflow t - outflow worst_case_inflow control_concrete s t).
+        * exact Hlevel.
+        * exact Hnocross.
   Qed.
 
   (** Concrete run preserves adequate over the horizon. *)
@@ -967,6 +1096,17 @@ Qed.
     apply run_preserves_safe_concrete.
     exact Hadq.
   Qed.
+
+  (** ---------- LIVENESS PROPERTIES ---------- *)
+
+  (** The key liveness property is level_nonincreasing_below_threshold
+      (proven above), which shows that reservoir level never increases
+      when below threshold. Combined with outflow_ge_inflow, we have:
+
+      1. Below threshold: level stays same or decreases
+      2. Above threshold: gate at 100%, maximum discharge
+
+      This ensures the system is stable and doesn't diverge. *)
 
   (** Horizon adequacy guarantee for the concrete controller. *)
   Corollary concrete_schedule_adequate :
@@ -1136,7 +1276,7 @@ Section ProportionalCertified.
   Hypothesis setpoint_below_crest : setpoint_cm + margin_cm <= max_reservoir_cm pc.
   Hypothesis margin_positive : margin_cm > 0.
   Hypothesis slew_realistic : actual_slew_pct < 100.
-  Hypothesis capacity_sufficient_prop : forall t, worst_case_inflow t <= gate_capacity_cms pc.
+  Hypothesis capacity_sufficient_prop : forall t, worst_case_inflow t <= gate_capacity_cm pc.
   Hypothesis inflow_below_margin : forall t, worst_case_inflow t <= margin_cm.
 
   Definition control_prop (s : State) (_ : nat) : nat :=
@@ -1177,13 +1317,60 @@ Section ProportionalCertified.
 
   Definition threshold_prop : nat := max_reservoir_cm pc - margin_cm.
 
-  (** Gain is sufficient to command 100% gate when above threshold.
-      For this to hold: Kp >= 100 / (threshold_prop - setpoint_cm).
-      Example: If threshold = 900cm, setpoint = 800cm, then Kp >= 100/100 = 1. *)
-  Hypothesis gain_sufficient :
+  (** Minimum error at threshold: threshold - setpoint.
+      This is the smallest error that will trigger full-open. *)
+  Definition min_error_at_threshold : nat := threshold_prop - setpoint_cm.
+
+  (** Minimum required gain to achieve 100% output at threshold.
+      Kp * min_error >= 100, so Kp >= ceil(100 / min_error). *)
+  Hypothesis min_error_positive : min_error_at_threshold > 0.
+
+  Definition min_required_gain : nat := div_ceil 100 min_error_positive.
+
+  (** Gain meets minimum requirement. *)
+  Hypothesis Kp_meets_min : Kp >= min_required_gain.
+
+  (** Helper: ceiling division property - ceil(a/b) * b >= a *)
+  Lemma div_ceil_mul_ge : forall a b (Hb : b > 0),
+    div_ceil a Hb * b >= a.
+  Proof.
+    intros a b Hb.
+    unfold div_ceil.
+    pose proof (Nat.Div0.div_mod a b) as Hmod_eq.
+    assert (Ha : a = a / b * b + a mod b) by lia.
+    assert (Hmod_bound : a mod b < b) by (apply Nat.mod_upper_bound; lia).
+    destruct (Nat.eq_dec (a mod b) 0) as [Hmod0|Hmod_ne].
+    - rewrite Hmod0 in Ha.
+      assert (Hplus : (a + b - 1) / b >= a / b).
+      { apply Nat.Div0.div_le_mono. lia. }
+      nia.
+    - assert (Hmod : a mod b > 0) by lia.
+      assert (Hlow : a / b * b < a) by lia.
+      assert (Hdiv_up : (a + b - 1) / b >= a / b + 1).
+      { apply Nat.div_le_lower_bound; lia. }
+      nia.
+  Qed.
+
+  (** Derived: Gain is sufficient to command 100% gate when above threshold. *)
+  Lemma gain_sufficient :
     forall s, reservoir_level_cm s >= threshold_prop ->
               gate_ok s ->
               Kp * (reservoir_level_cm s - setpoint_cm) >= 100.
+  Proof.
+    intros s Hlevel Hok.
+    assert (Herror : reservoir_level_cm s - setpoint_cm >= min_error_at_threshold).
+    { unfold min_error_at_threshold. lia. }
+    assert (Hkp_min : Kp * min_error_at_threshold >= 100).
+    { pose proof (@div_ceil_mul_ge 100 min_error_at_threshold min_error_positive) as Hceil.
+      unfold min_required_gain in Kp_meets_min.
+      assert (Hge : Kp * min_error_at_threshold >= min_required_gain * min_error_at_threshold).
+      { apply Nat.mul_le_mono_r. exact Kp_meets_min. }
+      unfold min_required_gain in Hge.
+      lia. }
+    apply Nat.le_trans with (m := Kp * min_error_at_threshold).
+    - exact Hkp_min.
+    - apply Nat.mul_le_mono_l. exact Herror.
+  Qed.
 
   Hypothesis stage_bounded_hyp :
     forall out, stage_from_outflow out <= max_downstream_cm pc.
@@ -1222,7 +1409,7 @@ Section ProportionalCertified.
       unfold outflow, available_water.
       set (avail := reservoir_level_cm s + worst_case_inflow t).
       set (cmd := control_prop s t).
-      set (cap := gate_capacity_cms pc * cmd / 100).
+      set (cap := gate_capacity_cm pc * cmd / 100).
       assert (Hcmd_100 : cmd = 100).
       { unfold cmd, control_prop.
         set (raw := Kp * (reservoir_level_cm s - setpoint_cm)).
@@ -1239,7 +1426,7 @@ Section ProportionalCertified.
       unfold cap.
       rewrite Hcmd_100.
       rewrite Nat.div_mul by discriminate.
-      assert (Hcap_ge : gate_capacity_cms pc >= worst_case_inflow t) by lia.
+      assert (Hcap_ge : gate_capacity_cm pc >= worst_case_inflow t) by lia.
       apply Nat.min_case_strong; intro Hcmp; lia.
   Qed.
 
@@ -1375,7 +1562,7 @@ Section RatingTableCertified.
   (** Worst-case inflow fits within margin. *)
   Hypothesis inflow_below_margin : forall t, worst_case_inflow t <= margin_cm.
   (** Gate capacity covers worst-case inflow. *)
-  Hypothesis capacity_sufficient : forall t, worst_case_inflow t <= gate_capacity_cms pc.
+  Hypothesis capacity_sufficient : forall t, worst_case_inflow t <= gate_capacity_cm pc.
   (** Slew allows full-open (placeholder for simplicity). *)
   Hypothesis gate_slew_full
     : gate_slew_pct pc >= 100.
@@ -1462,9 +1649,9 @@ Section RatingTableCertified.
       unfold outflow, available_water. rewrite Hbranch.
       apply Nat.min_case_strong; intro Hcmp.
       + rewrite Nat.div_mul by discriminate.
-        assert (Hstep1 : reservoir_level_cm s + worst_case_inflow t <= reservoir_level_cm s + gate_capacity_cms pc)
+        assert (Hstep1 : reservoir_level_cm s + worst_case_inflow t <= reservoir_level_cm s + gate_capacity_cm pc)
           by (apply Nat.add_le_mono_l; exact Hcap).
-        assert (Hstep2 : reservoir_level_cm s + gate_capacity_cms pc <= max_reservoir_cm pc + gate_capacity_cms pc)
+        assert (Hstep2 : reservoir_level_cm s + gate_capacity_cm pc <= max_reservoir_cm pc + gate_capacity_cm pc)
           by (apply Nat.add_le_mono_r; exact Hres).
         eapply Nat.le_trans; [exact Hstep1|].
         eapply Nat.le_trans; [exact Hstep2|].
@@ -1588,8 +1775,8 @@ Section MultiGate.
   Hypothesis gate_count_pos : gate_count > 0.
 
   (** Capacity of each individual gate in cms. *)
-  Variable gate_capacity_cms_per_gate : nat.
-  Hypothesis gate_capacity_per_gate_pos : gate_capacity_cms_per_gate > 0.
+  Variable gate_capacity_cm_per_gate : nat.
+  Hypothesis gate_capacity_per_gate_pos : gate_capacity_cm_per_gate > 0.
 
   (** Hydraulic response function for multi-gate aggregate outflow. *)
   Variable stage_from_outflow_mg : nat -> nat.
@@ -1638,7 +1825,7 @@ Section MultiGate.
 
   (** Aggregate discharge capacity given gate openings. *)
   Definition outflow_capacity_mg (gs:Gates) : nat :=
-    gate_capacity_cms_per_gate * sum_gate_pct gs / 100.
+    gate_capacity_cm_per_gate * sum_gate_pct gs / 100.
 
   (** Aggregate outflow: min of capacity and available water. *)
   Definition outflow_mg (s:State) (t:nat) : nat :=
@@ -1753,8 +1940,8 @@ Section SignedFlow.
   Hypothesis z_max_downstream_pos : z_max_downstream_cm > 0.
 
   (** Integer-valued capacity at 100% gate (cms). *)
-  Variable z_gate_capacity_cms : Z.
-  Hypothesis z_gate_capacity_pos : z_gate_capacity_cms > 0.
+  Variable z_gate_capacity_cm : Z.
+  Hypothesis z_gate_capacity_pos : z_gate_capacity_cm > 0.
 
   (** Integer-valued gate slew (%). *)
   Variable z_gate_slew_pct     : Z.
@@ -1791,7 +1978,7 @@ Section SignedFlow.
 
   (** Integer outflow: min of capacity and availability. *)
   Definition outflow_z (ctrl:ZState -> nat -> Z) (s:ZState) (t:nat) : Z :=
-    Z.min (z_gate_capacity_cms * ctrl s t / 100) (available_water_z s t).
+    Z.min (z_gate_capacity_cm * ctrl s t / 100) (available_water_z s t).
 
   (** Integer plant step. *)
   Definition step_z (ctrl:ZState -> nat -> Z) (s:ZState) (t:nat) : ZState :=
@@ -1825,7 +2012,7 @@ Section SignedFlow.
 
   (** Integer gate capacity covers worst-case inflow. *)
   Hypothesis capacity_sufficient_z :
-    forall s t, worst_case_inflow_z t <= z_gate_capacity_cms * control_z s t / 100.
+    forall s t, worst_case_inflow_z t <= z_gate_capacity_cm * control_z s t / 100.
 
   (** Integer stage response respects downstream ceiling. *)
   Hypothesis stage_bounded_z :
@@ -1861,7 +2048,7 @@ Section SignedFlow.
     intros s t Hsafe. unfold safe_z in *. destruct Hsafe as [Hres0 [Hres_max [Hstage0 Hstage_max]]].
     unfold step_z. simpl.
     set (inflow := worst_case_inflow_z t).
-    set (outcap := z_gate_capacity_cms * control_z s t / 100).
+    set (outcap := z_gate_capacity_cm * control_z s t / 100).
     set (aw := available_water_z s t).
     destruct (Z.leb_spec outcap aw) as [Hle_cap|Hgt_cap].
     - (* capacity branch is limiting *)
@@ -2359,10 +2546,10 @@ Section CascadingDamFailure.
     normal_inflow + surge_rate_per_step.
 
   Hypothesis downstream_capacity_handles_surge :
-    combined_inflow_during_surge <= gate_capacity_cms downstream_pc.
+    combined_inflow_during_surge <= gate_capacity_cm downstream_pc.
 
   Definition surge_margin : nat :=
-    gate_capacity_cms downstream_pc - combined_inflow_during_surge.
+    gate_capacity_cm downstream_pc - combined_inflow_during_surge.
 
   Lemma surge_margin_nonneg : surge_margin >= 0.
   Proof.
@@ -2440,7 +2627,7 @@ Section MultiObjectiveOptimization.
 
   Definition compute_objectives (s : State) (cmd : nat) (prev_cmd : nat) : Objectives :=
     {| overflow_risk := level_to_overflow_risk (reservoir_level_cm s);
-       downstream_impact := outflow_to_downstream_impact (gate_capacity_cms pc * cmd / 100);
+       downstream_impact := outflow_to_downstream_impact (gate_capacity_cm pc * cmd / 100);
        gate_wear := gate_movement_to_wear (abs_diff cmd prev_cmd) |}.
 
   Hypothesis risk_monotone : forall l1 l2, l1 <= l2 -> level_to_overflow_risk l1 <= level_to_overflow_risk l2.
@@ -2466,7 +2653,7 @@ Section MultiObjectiveOptimization.
     unfold compute_objectives.
     simpl.
     apply impact_monotone.
-    assert (Hmul : gate_capacity_cms pc * cmd1 <= gate_capacity_cms pc * cmd2)
+    assert (Hmul : gate_capacity_cm pc * cmd1 <= gate_capacity_cm pc * cmd2)
       by (apply Nat.mul_le_mono_l; exact Hcmd).
     apply Nat.Div0.div_le_mono with (c := 100) in Hmul.
     exact Hmul.
@@ -2506,13 +2693,13 @@ Section RegulatoryStandards.
   }.
 
   Definition pmf_passable (fdp : FloodDesignParams) : Prop :=
-    pmf_inflow fdp <= gate_capacity_cms pc.
+    pmf_inflow fdp <= gate_capacity_cm pc.
 
   Definition idf_with_freeboard (fdp : FloodDesignParams) : Prop :=
     idf_inflow fdp + freeboard_cm fdp <= max_reservoir_cm pc.
 
   Definition spillway_adequate (fdp : FloodDesignParams) : Prop :=
-    min_spillway_capacity fdp <= gate_capacity_cms pc.
+    min_spillway_capacity fdp <= gate_capacity_cm pc.
 
   Definition regulatory_compliant (fdp : FloodDesignParams) : Prop :=
     pmf_passable fdp /\
@@ -2522,7 +2709,7 @@ Section RegulatoryStandards.
   Lemma pmf_passable_sufficient : forall fdp inflow,
     pmf_passable fdp ->
     inflow <= pmf_inflow fdp ->
-    inflow <= gate_capacity_cms pc.
+    inflow <= gate_capacity_cm pc.
   Proof.
     intros fdp inflow Hpmf Hinflow.
     unfold pmf_passable in Hpmf.
@@ -2590,7 +2777,7 @@ Section RegulatoryStandards.
   Lemma regulatory_capacity_bound : forall fdp inflow hc,
     regulatory_compliant fdp ->
     inflow <= design_flood (pmf_inflow fdp) hc ->
-    inflow <= gate_capacity_cms pc.
+    inflow <= gate_capacity_cm pc.
   Proof.
     intros fdp inflow hc [Hpmf _] Hinflow.
     assert (Hdesign := design_flood_le_pmf (pmf_inflow fdp) hc).
@@ -2686,7 +2873,7 @@ Section WitnessExamples.
   Qed.
 
   Lemma witness_capacity_covers_inflow :
-    forall t, witness_inflow t <= gate_capacity_cms witness_plant.
+    forall t, witness_inflow t <= gate_capacity_cm witness_plant.
   Proof.
     intro t.
     vm_compute.
@@ -2694,13 +2881,230 @@ Section WitnessExamples.
   Qed.
 
   Lemma witness_stage_bounded_at_capacity :
-    witness_stage (gate_capacity_cms witness_plant) <= max_downstream_cm witness_plant.
+    witness_stage (gate_capacity_cm witness_plant) <= max_downstream_cm witness_plant.
   Proof.
     vm_compute.
     lia.
   Qed.
 
 End WitnessExamples.
+
+(** --------------------------------------------------------------------------- *)
+(** Consistency Proof: All ConcreteCertified hypotheses are simultaneously      *)
+(** satisfiable for a concrete configuration.                                   *)
+(**                                                                             *)
+(** This is CRITICAL for rigor: it proves the abstract safety theorems are      *)
+(** not vacuously true due to inconsistent assumptions.                         *)
+(** --------------------------------------------------------------------------- *)
+
+Section ConsistencyProof.
+
+  (** Concrete plant with parameters designed to satisfy all constraints.
+      Key design choices:
+      - gate_slew_pct = 50: allows min_gate_pct = 50 satisfying both slew constraints
+      - gate_capacity_cm = 100: with min_gate_pct = 50, ensures outflow >= 50
+      - margin_cm = 200: provides headroom for inflow
+      - max_stage_rise_cm = 200: covers any stage change *)
+  Definition consistent_plant : PlantConfig.
+  Proof.
+    refine (@mkPlantConfig
+      1000   (* max_reservoir_cm *)
+      200    (* max_downstream_cm *)
+      100    (* gate_capacity_cm *)
+      10     (* forecast_error_pct *)
+      50     (* gate_slew_pct *)
+      200    (* max_stage_rise_cm *)
+      1000   (* reservoir_area_cm2 *)
+      1      (* timestep_s *)
+      _ _ _ _ _).
+    all: abstract lia.
+  Defined.
+
+  (** Constant inflow forecast: 40000 cm³/s.
+      After conversion and error scaling: worst_case ≈ 44 cm/timestep. *)
+  Definition consistent_inflow_forecast (_ : nat) : nat := 40000.
+
+  (** Linear stage response with saturation at gate capacity. *)
+  Definition consistent_stage (out : nat) : nat :=
+    50 + Nat.min out 100.
+
+  (** Constant forecast error (uses base rate). *)
+  Definition consistent_error_t (_ : nat) : nat :=
+    forecast_error_pct consistent_plant.
+
+  (** Error bound hypothesis. *)
+  Lemma consistent_error_bound :
+    forall t, consistent_error_t t <= 2 * forecast_error_pct consistent_plant.
+  Proof.
+    intro t. unfold consistent_error_t. lia.
+  Qed.
+
+  (** Computed worst-case inflow for this configuration. *)
+  Definition consistent_worst_case (t : nat) : nat :=
+    worst_case_inflow consistent_plant consistent_inflow_forecast t.
+
+  (** Concrete parameter values for ConcreteCertified. *)
+  Definition cc_base_tailwater : nat := 50.
+  Definition cc_margin : nat := 200.
+  Definition cc_stage_gain : nat := 1.
+  Definition cc_max_inflow : nat := 50.
+  Definition cc_min_gate : nat := 50.
+
+  (** Verify worst_case_inflow is bounded. *)
+  Lemma consistent_worst_case_bound :
+    forall t, consistent_worst_case t <= 44.
+  Proof.
+    intro t.
+    unfold consistent_worst_case, worst_case_inflow, to_level, flow_to_level.
+    unfold div_ceil, consistent_inflow_forecast.
+    vm_compute.
+    lia.
+  Qed.
+
+  (** --- Proof that all ConcreteCertified hypotheses are satisfied --- *)
+
+  (** H1: margin_le_reservoir *)
+  Lemma cc_margin_le_reservoir :
+    cc_margin <= max_reservoir_cm consistent_plant.
+  Proof. vm_compute. lia. Qed.
+
+  (** H2: inflow_below_margin *)
+  Lemma cc_inflow_below_margin :
+    forall t, consistent_worst_case t <= cc_margin.
+  Proof.
+    intro t.
+    pose proof (consistent_worst_case_bound t).
+    unfold cc_margin.
+    lia.
+  Qed.
+
+  (** H3: slew_pos *)
+  Lemma cc_slew_pos :
+    gate_slew_pct consistent_plant > 0.
+  Proof. vm_compute. lia. Qed.
+
+  (** H4: max_inflow_bounds *)
+  Lemma cc_max_inflow_bounds :
+    forall t, consistent_worst_case t <= cc_max_inflow.
+  Proof.
+    intro t.
+    pose proof (consistent_worst_case_bound t).
+    unfold cc_max_inflow.
+    lia.
+  Qed.
+
+  (** H5: capacity_exceeds_max_inflow *)
+  Lemma cc_capacity_exceeds_max_inflow :
+    cc_max_inflow <= gate_capacity_cm consistent_plant.
+  Proof. vm_compute. lia. Qed.
+
+  (** H6: margin_covers_ramp - margin covers inflow during gate ramp-up.
+      ramp_steps = ceil(100/50) = 2, so need margin >= 2 * 50 = 100. *)
+  Lemma cc_margin_covers_ramp :
+    cc_margin >= div_ceil 100 cc_slew_pos * cc_max_inflow.
+  Proof. vm_compute. lia. Qed.
+
+  (** H7: stage_model - stage follows linear model with saturation. *)
+  Lemma cc_stage_model :
+    forall out,
+      consistent_stage out =
+      cc_base_tailwater + cc_stage_gain * Nat.min out (gate_capacity_cm consistent_plant).
+  Proof.
+    intro out.
+    unfold consistent_stage, cc_base_tailwater, cc_stage_gain, consistent_plant.
+    simpl.
+    lia.
+  Qed.
+
+  (** H8: stage_gain_capacity_bound - max stage is within downstream limit. *)
+  Lemma cc_stage_gain_capacity_bound :
+    cc_base_tailwater + cc_stage_gain * gate_capacity_cm consistent_plant
+      <= max_downstream_cm consistent_plant.
+  Proof. vm_compute. lia. Qed.
+
+  (** H9: ramp_budget - stage rise allowance covers max stage change. *)
+  Lemma cc_ramp_budget :
+    max_stage_rise_cm consistent_plant >= cc_stage_gain * gate_capacity_cm consistent_plant.
+  Proof. vm_compute. lia. Qed.
+
+  (** H10: min_gate_bounded *)
+  Lemma cc_min_gate_bounded :
+    cc_min_gate <= 100.
+  Proof. vm_compute. lia. Qed.
+
+  (** H11: min_gate_sufficient - min gate ensures outflow >= max inflow.
+      100 * 50 / 100 = 50 >= 50. *)
+  Lemma cc_min_gate_sufficient :
+    gate_capacity_cm consistent_plant * cc_min_gate / 100 >= cc_max_inflow.
+  Proof. vm_compute. lia. Qed.
+
+  (** H12: min_gate_le_slew *)
+  Lemma cc_min_gate_le_slew :
+    cc_min_gate <= gate_slew_pct consistent_plant.
+  Proof. vm_compute. lia. Qed.
+
+  (** H13: slew_reaches_min_gate *)
+  Lemma cc_slew_reaches_min_gate :
+    cc_min_gate + gate_slew_pct consistent_plant >= 100.
+  Proof. vm_compute. lia. Qed.
+
+  (** MAIN CONSISTENCY THEOREM: All hypotheses satisfied simultaneously.
+      This proves the ConcreteCertified theorems apply to a real configuration. *)
+  Theorem concrete_certified_consistent :
+    cc_margin <= max_reservoir_cm consistent_plant /\
+    (forall t, consistent_worst_case t <= cc_margin) /\
+    gate_slew_pct consistent_plant > 0 /\
+    (forall t, consistent_worst_case t <= cc_max_inflow) /\
+    cc_max_inflow <= gate_capacity_cm consistent_plant /\
+    cc_margin >= div_ceil 100 cc_slew_pos * cc_max_inflow /\
+    cc_base_tailwater + cc_stage_gain * gate_capacity_cm consistent_plant
+      <= max_downstream_cm consistent_plant /\
+    max_stage_rise_cm consistent_plant >= cc_stage_gain * gate_capacity_cm consistent_plant /\
+    cc_min_gate <= 100 /\
+    gate_capacity_cm consistent_plant * cc_min_gate / 100 >= cc_max_inflow /\
+    cc_min_gate <= gate_slew_pct consistent_plant /\
+    cc_min_gate + gate_slew_pct consistent_plant >= 100.
+  Proof.
+    repeat split.
+    - exact cc_margin_le_reservoir.
+    - exact cc_inflow_below_margin.
+    - exact cc_slew_pos.
+    - exact cc_max_inflow_bounds.
+    - exact cc_capacity_exceeds_max_inflow.
+    - exact cc_margin_covers_ramp.
+    - exact cc_stage_gain_capacity_bound.
+    - exact cc_ramp_budget.
+    - exact cc_min_gate_bounded.
+    - exact cc_min_gate_sufficient.
+    - exact cc_min_gate_le_slew.
+    - exact cc_slew_reaches_min_gate.
+  Qed.
+
+  (** Example adequate initial state for the consistent configuration. *)
+  Definition cc_initial_state : State :=
+    {| reservoir_level_cm := 500;
+       downstream_stage_cm := 75;
+       gate_open_pct := 50 |}.
+
+  (** Initial state is safe. *)
+  Lemma cc_initial_safe :
+    safe consistent_plant cc_initial_state.
+  Proof.
+    unfold safe.
+    vm_compute.
+    split; lia.
+  Qed.
+
+  (** Initial state has valid gate. *)
+  Lemma cc_initial_gate_ok :
+    gate_ok cc_initial_state.
+  Proof.
+    unfold gate_ok.
+    vm_compute.
+    lia.
+  Qed.
+
+End ConsistencyProof.
 
 (** --------------------------------------------------------------------------- *)
 (** Counterexample Section: Demonstrations of failure without proper control    *)
@@ -2722,7 +3126,7 @@ Section CounterexampleTests.
   Definition high_inflow (_ : nat) : nat := 10.
 
   Lemma counterexample_capacity_insufficient :
-    exists t, high_inflow t > gate_capacity_cms bad_plant_no_capacity.
+    exists t, high_inflow t > gate_capacity_cm bad_plant_no_capacity.
   Proof.
     exists 0.
     vm_compute.
@@ -2743,8 +3147,8 @@ Section CounterexampleTests.
   Qed.
 
   Lemma counterexample_max_outflow :
-    gate_capacity_cms bad_plant_no_capacity * 100 / 100
-      = gate_capacity_cms bad_plant_no_capacity.
+    gate_capacity_cm bad_plant_no_capacity * 100 / 100
+      = gate_capacity_cm bad_plant_no_capacity.
   Proof.
     vm_compute.
     reflexivity.
@@ -2752,11 +3156,11 @@ Section CounterexampleTests.
 
   Lemma counterexample_outflow_limited_when_bounded :
     forall cmd, cmd <= 100 ->
-      gate_capacity_cms bad_plant_no_capacity * cmd / 100
-        <= gate_capacity_cms bad_plant_no_capacity.
+      gate_capacity_cm bad_plant_no_capacity * cmd / 100
+        <= gate_capacity_cm bad_plant_no_capacity.
   Proof.
     intros cmd Hcmd.
-    assert (Hcap : gate_capacity_cms bad_plant_no_capacity = 1) by reflexivity.
+    assert (Hcap : gate_capacity_cm bad_plant_no_capacity = 1) by reflexivity.
     rewrite Hcap.
     rewrite Nat.mul_1_l.
     apply Nat.Div0.div_le_upper_bound.
@@ -2848,7 +3252,7 @@ End BoundaryTests.
          Typically the dam crest elevation minus spillway sill elevation.
        - max_downstream_cm: Maximum allowable downstream stage (cm).
          Based on channel capacity or regulatory limits.
-       - gate_capacity_cms: Maximum discharge through spillway gates.
+       - gate_capacity_cm: Maximum discharge through spillway gates.
          Convert from m³/s to cm/timestep using flow_to_level.
        - gate_slew_pct: Maximum gate movement per timestep (% of full travel).
          Typically 1-5% per minute for large radial gates.
