@@ -17,8 +17,8 @@
 (** TODO:
      [x] Reduce Z model hypothesis count
      [x] Validate backwater head_ratio_pct
-     [ ] Formalize forecast error relationship
-     [ ] Add actuator dynamics model
+     [x] Formalize forecast error relationship
+     [x] Add actuator dynamics model
      [ ] Derive stage model from hydraulic physics
      [ ] Extend step_mg to track per-gate state
      [ ] Add MPC variant
@@ -230,6 +230,59 @@ Section WithPlantConfig.
   Proof.
     intro t.
     unfold constant_error_pct.
+    lia.
+  Qed.
+
+  (** Worst-case inflow with constant error equals base worst_case_inflow. *)
+  Lemma worst_case_constant_eq :
+    forall t,
+      to_level (div_ceil (inflow_forecast_cms t * (100 + constant_error_pct t)) pos_100)
+      = worst_case_inflow t.
+  Proof.
+    intro t.
+    unfold constant_error_pct, worst_case_inflow.
+    reflexivity.
+  Qed.
+
+  (** Worst-case inflow is monotone in forecast error percentage. *)
+  Lemma worst_case_error_mono :
+    forall t e1 e2,
+      e1 <= e2 ->
+      to_level (div_ceil (inflow_forecast_cms t * (100 + e1)) pos_100) <=
+      to_level (div_ceil (inflow_forecast_cms t * (100 + e2)) pos_100).
+  Proof.
+    intros t e1 e2 He.
+    apply to_level_mono.
+    apply div_ceil_mono_n.
+    apply Nat.mul_le_mono_l.
+    lia.
+  Qed.
+
+  (** Zero forecast error gives forecast as worst case. *)
+  Lemma worst_case_zero_error :
+    forall t,
+      to_level (div_ceil (inflow_forecast_cms t * (100 + 0)) pos_100) =
+      to_level (div_ceil (inflow_forecast_cms t * 100) pos_100).
+  Proof.
+    intro t.
+    reflexivity.
+  Qed.
+
+  (** Linear error growth model: error increases linearly with forecast horizon. *)
+  Definition linear_error_pct (base_error : nat) (growth_per_step : nat) (t : nat) : nat :=
+    base_error + growth_per_step * t.
+
+  (** Linear error satisfies bound when growth is limited. *)
+  Lemma linear_error_satisfies_bound :
+    forall base_error growth_per_step horizon,
+      base_error + growth_per_step * horizon <= 2 * forecast_error_pct pc ->
+      forall t, t <= horizon ->
+        linear_error_pct base_error growth_per_step t <= 2 * forecast_error_pct pc.
+  Proof.
+    intros base_error growth_per_step horizon Hbound t Ht.
+    unfold linear_error_pct.
+    assert (Hmul : growth_per_step * t <= growth_per_step * horizon)
+      by (apply Nat.mul_le_mono_l; exact Ht).
     lia.
   Qed.
 
@@ -2968,6 +3021,119 @@ Section GateFailureScenarios.
        n_working * (capacity_per_gate * working_cmd / 100).
 
 End GateFailureScenarios.
+
+(** --------------------------------------------------------------------------- *)
+(** Actuator Dynamics Modeling                                                    *)
+(**                                                                              *)
+(** Gate actuators have physical limitations: they cannot instantly reach        *)
+(** commanded positions. This section models first-order actuator dynamics       *)
+(** where position approaches setpoint exponentially.                            *)
+(** --------------------------------------------------------------------------- *)
+
+Section ActuatorDynamics.
+
+  (** Actuator time constant as percentage of travel per timestep.
+      E.g., 50 means actuator moves 50% of remaining error per timestep. *)
+  Variable actuator_speed_pct : nat.
+  Hypothesis actuator_speed_pos : actuator_speed_pct > 0.
+  Hypothesis actuator_speed_bounded : actuator_speed_pct <= 100.
+
+  (** First-order actuator response: moves toward setpoint by speed_pct of error. *)
+  Definition actuator_response (current_pct setpoint_pct : nat) : nat :=
+    let error := if Nat.leb current_pct setpoint_pct
+                 then setpoint_pct - current_pct
+                 else current_pct - setpoint_pct in
+    let move := error * actuator_speed_pct / 100 in
+    if Nat.leb current_pct setpoint_pct
+    then current_pct + move
+    else current_pct - move.
+
+  (** Actuator response is bounded by current and setpoint. *)
+  Lemma actuator_response_bounded :
+    forall current setpoint,
+      current <= 100 ->
+      setpoint <= 100 ->
+      actuator_response current setpoint <= 100.
+  Proof.
+    intros current setpoint Hcur Hset.
+    unfold actuator_response.
+    destruct (Nat.leb current setpoint) eqn:Hleb.
+    - apply Nat.leb_le in Hleb.
+      assert (Hmove : (setpoint - current) * actuator_speed_pct / 100 <= setpoint - current).
+      { apply Nat.Div0.div_le_upper_bound.
+        apply Nat.mul_le_mono_l with (p := setpoint - current) in actuator_speed_bounded.
+        lia. }
+      lia.
+    - apply Nat.leb_gt in Hleb.
+      assert (Hmove : (current - setpoint) * actuator_speed_pct / 100 <= current - setpoint).
+      { apply Nat.Div0.div_le_upper_bound.
+        apply Nat.mul_le_mono_l with (p := current - setpoint) in actuator_speed_bounded.
+        lia. }
+      lia.
+  Qed.
+
+  (** Actuator moves toward setpoint (monotonicity). *)
+  Lemma actuator_moves_toward_setpoint :
+    forall current setpoint,
+      current <= setpoint ->
+      current <= actuator_response current setpoint.
+  Proof.
+    intros current setpoint Hle.
+    unfold actuator_response.
+    assert (Hleb : Nat.leb current setpoint = true) by (apply Nat.leb_le; exact Hle).
+    rewrite Hleb.
+    lia.
+  Qed.
+
+  (** Tracking error decreases each step (convergence). *)
+  Lemma actuator_error_decreases :
+    forall current setpoint,
+      current <= setpoint ->
+      setpoint - actuator_response current setpoint <=
+      setpoint - current - (setpoint - current) * actuator_speed_pct / 100.
+  Proof.
+    intros current setpoint Hle.
+    unfold actuator_response.
+    assert (Hleb : Nat.leb current setpoint = true) by (apply Nat.leb_le; exact Hle).
+    rewrite Hleb.
+    lia.
+  Qed.
+
+  (** Maximum position change per step. *)
+  Definition max_actuator_move : nat :=
+    100 * actuator_speed_pct / 100.
+
+  (** Actuator change is bounded. *)
+  Lemma actuator_change_bounded :
+    forall current setpoint,
+      current <= 100 ->
+      setpoint <= 100 ->
+      (if Nat.leb current setpoint
+       then actuator_response current setpoint - current
+       else current - actuator_response current setpoint) <= max_actuator_move.
+  Proof.
+    intros current setpoint Hcur Hset.
+    unfold actuator_response, max_actuator_move.
+    destruct (Nat.leb current setpoint) eqn:Hleb.
+    - apply Nat.leb_le in Hleb.
+      assert (Herr : setpoint - current <= 100) by lia.
+      assert (Hmove : (setpoint - current) * actuator_speed_pct / 100 <=
+                      100 * actuator_speed_pct / 100).
+      { apply Nat.Div0.div_le_mono.
+        apply Nat.mul_le_mono_r.
+        exact Herr. }
+      lia.
+    - apply Nat.leb_gt in Hleb.
+      assert (Herr : current - setpoint <= 100) by lia.
+      assert (Hmove : (current - setpoint) * actuator_speed_pct / 100 <=
+                      100 * actuator_speed_pct / 100).
+      { apply Nat.Div0.div_le_mono.
+        apply Nat.mul_le_mono_r.
+        exact Herr. }
+      lia.
+  Qed.
+
+End ActuatorDynamics.
 
 (** --------------------------------------------------------------------------- *)
 (** Timestep Jitter Modeling                                                     *)
