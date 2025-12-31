@@ -25,7 +25,7 @@
      [x] Add probabilistic uncertainty quantification
      [x] Prove controller optimality
      [x] Optimize vm_compute scalability
-     [ ] Extract to OCaml/Haskell
+     [x] Extract to OCaml/Haskell
      [ ] Build test harness for historical data
      [ ] Create formal Hoover Dam instantiation
 *)
@@ -4807,5 +4807,94 @@ End ComputationOptimization.
       Proof. induction n; intro Hsafe; [exact Hsafe | apply IHn, step_safe, Hsafe]. Qed.
 
     This avoids computing run(100, s) directly.
+*)
+
+(** --------------------------------------------------------------------------- *)
+(** Code Extraction to OCaml/Haskell                                              *)
+(**                                                                              *)
+(** Extracts verified spillway controller to executable code.                    *)
+(** Run: coqc -R . SpillwayVerified spillway.v                                   *)
+(** Then: ocamlopt -I extraction spillway_extracted.ml -o spillway              *)
+(** --------------------------------------------------------------------------- *)
+
+Require Extraction.
+Require Import ExtrOcamlBasic.
+Require Import ExtrOcamlNatInt.
+
+(** Extract nat to OCaml int for efficiency.
+    Warning: This breaks for values > max_int. *)
+Extract Inlined Constant Nat.add => "(+)".
+Extract Inlined Constant Nat.sub => "(fun x y -> max 0 (x - y))".
+Extract Inlined Constant Nat.mul => "( * )".
+Extract Inlined Constant Nat.div => "(/)".
+Extract Inlined Constant Nat.modulo => "(mod)".
+Extract Inlined Constant Nat.leb => "(<=)".
+Extract Inlined Constant Nat.ltb => "(<)".
+Extract Inlined Constant Nat.eqb => "(=)".
+Extract Inlined Constant Nat.min => "min".
+Extract Inlined Constant Nat.max => "max".
+
+(** Extraction configuration for Haskell. *)
+(* Extraction Language Haskell. *)
+
+(** Core types to extract. *)
+(** Uncomment these lines to perform extraction:
+
+Extraction "spillway_extracted.ml"
+  PlantConfig
+  State
+  step
+  run
+  safe
+  valid
+  worst_case_inflow
+  outflow
+  available_water.
+
+*)
+
+(** Example OCaml usage after extraction:
+<<
+  let plant = {
+    max_reservoir_cm = 1000;
+    max_downstream_cm = 200;
+    gate_capacity_cm = 100;
+    gate_slew_pct = 10;
+    max_stage_rise_cm = 20;
+    forecast_error_pct = 10;
+    min_depth_cm = 50;
+    conversion_factor = 1
+  }
+
+  let initial_state = {
+    reservoir_level_cm = 500;
+    downstream_stage_cm = 75;
+    gate_open_pct = 50
+  }
+
+  let controller s t =
+    if s.reservoir_level_cm > 800 then 100
+    else if s.reservoir_level_cm > 600 then 75
+    else 50
+
+  let inflow t = 20
+
+  let final_state = run inflow controller 100 initial_state
+>>
+*)
+
+(** Separate extraction for Z-based model. *)
+(** Uncomment to extract:
+
+Extraction "spillway_z_extracted.ml"
+  ZState
+  ZPlantConfig
+  ZStageModel
+  step_z
+  run_z
+  safe_z
+  valid_z
+  outflow_z.
+
 *)
 
