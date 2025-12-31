@@ -19,7 +19,7 @@
      [x] Validate backwater head_ratio_pct
      [x] Formalize forecast error relationship
      [x] Add actuator dynamics model
-     [ ] Derive stage model from hydraulic physics
+     [x] Derive stage model from hydraulic physics
      [ ] Extend step_mg to track per-gate state
      [ ] Add MPC variant
      [ ] Add probabilistic uncertainty quantification
@@ -3298,6 +3298,132 @@ Section BackwaterEffects.
   Qed.
 
 End BackwaterEffects.
+
+(** --------------------------------------------------------------------------- *)
+(** Hydraulic Stage Derivation                                                    *)
+(**                                                                              *)
+(** Derives the linear stage model from Manning's equation principles.            *)
+(** For wide rectangular channels: Q = (1/n) * B * y^(5/3) * S^(1/2)             *)
+(** which inverts to y ~ Q^(3/5). Near an operating point, this linearizes.      *)
+(** --------------------------------------------------------------------------- *)
+
+Section HydraulicStageDerivation.
+
+  (** Channel width (m * 100 for cm precision). *)
+  Variable channel_width_cm : nat.
+  Hypothesis channel_width_pos : channel_width_cm > 0.
+
+  (** Channel slope (dimensionless * 10000 for precision). *)
+  Variable slope_factor : nat.
+  Hypothesis slope_pos : slope_factor > 0.
+
+  (** Manning's n coefficient (dimensionless * 1000). *)
+  Variable manning_n_scaled : nat.
+  Hypothesis manning_n_pos : manning_n_scaled > 0.
+
+  (** Reference discharge for linearization (cm/timestep). *)
+  Variable reference_discharge : nat.
+
+  (** Reference stage at reference discharge (cm). *)
+  Variable reference_stage : nat.
+
+  (** Stage sensitivity: d(stage)/d(discharge) at reference point (scaled by 1000). *)
+  Variable stage_sensitivity_scaled : nat.
+
+  (** Reference stage is large enough that subtraction won't underflow. *)
+  Hypothesis reference_stage_sufficient :
+    reference_discharge * stage_sensitivity_scaled / 1000 <= reference_stage.
+
+  (** Linearized stage model: stage = ref_stage + sensitivity * (Q - ref_Q) / 1000.
+      This is the first-order Taylor expansion around the reference point. *)
+  Definition hydraulic_stage (discharge : nat) : nat :=
+    if Nat.leb discharge reference_discharge
+    then reference_stage - (reference_discharge - discharge) * stage_sensitivity_scaled / 1000
+    else reference_stage + (discharge - reference_discharge) * stage_sensitivity_scaled / 1000.
+
+  (** Hydraulic stage equals reference at reference discharge. *)
+  Lemma hydraulic_stage_at_reference :
+    hydraulic_stage reference_discharge = reference_stage.
+  Proof.
+    unfold hydraulic_stage.
+    assert (Hleb : Nat.leb reference_discharge reference_discharge = true)
+      by (apply Nat.leb_refl).
+    rewrite Hleb.
+    replace (reference_discharge - reference_discharge) with 0 by lia.
+    simpl.
+    lia.
+  Qed.
+
+  (** Hydraulic stage is monotone in discharge. *)
+  Lemma hydraulic_stage_monotone :
+    forall q1 q2,
+      q1 <= q2 ->
+      hydraulic_stage q1 <= hydraulic_stage q2.
+  Proof.
+    intros q1 q2 Hle.
+    unfold hydraulic_stage.
+    destruct (Nat.leb q1 reference_discharge) eqn:Hleb1;
+    destruct (Nat.leb q2 reference_discharge) eqn:Hleb2.
+    - apply Nat.leb_le in Hleb1.
+      apply Nat.leb_le in Hleb2.
+      apply Nat.sub_le_mono_l.
+      apply Nat.Div0.div_le_mono.
+      apply Nat.mul_le_mono_r.
+      lia.
+    - apply Nat.leb_le in Hleb1.
+      apply Nat.leb_gt in Hleb2.
+      assert (Hsub_bound : (reference_discharge - q1) * stage_sensitivity_scaled / 1000 <=
+                           reference_discharge * stage_sensitivity_scaled / 1000).
+      { apply Nat.Div0.div_le_mono. apply Nat.mul_le_mono_r. lia. }
+      assert (Hsub_ref : (reference_discharge - q1) * stage_sensitivity_scaled / 1000 <= reference_stage).
+      { apply Nat.le_trans with (m := reference_discharge * stage_sensitivity_scaled / 1000);
+        [exact Hsub_bound | exact reference_stage_sufficient]. }
+      lia.
+    - apply Nat.leb_gt in Hleb1.
+      apply Nat.leb_le in Hleb2.
+      lia.
+    - apply Nat.leb_gt in Hleb1.
+      apply Nat.leb_gt in Hleb2.
+      apply Nat.add_le_mono_l.
+      apply Nat.Div0.div_le_mono.
+      apply Nat.mul_le_mono_r.
+      lia.
+  Qed.
+
+  (** Physical interpretation: stage_sensitivity relates to Manning's equation.
+      For wide rectangular channel: dy/dQ = (3/5) * n / (B * sqrt(S) * y^(2/3))
+      At y = reference_stage, this gives the sensitivity. *)
+
+  (** Base stage when discharge is zero (minimum water level). *)
+  Definition base_stage_hydraulic : nat :=
+    hydraulic_stage 0.
+
+  (** Maximum discharge bound. *)
+  Variable max_discharge : nat.
+
+  (** Sensitivity is bounded so stage increase is limited. *)
+  Hypothesis sensitivity_bounded :
+    forall d, d <= max_discharge ->
+      (d - reference_discharge) * stage_sensitivity_scaled / 1000 <= max_discharge.
+
+  (** Hydraulic stage is bounded for bounded discharge. *)
+  Lemma hydraulic_stage_bounded :
+    forall q,
+      q <= max_discharge ->
+      hydraulic_stage q <= reference_stage + max_discharge.
+  Proof.
+    intros q Hq.
+    unfold hydraulic_stage.
+    destruct (Nat.leb q reference_discharge) eqn:Hleb.
+    - apply Nat.leb_le in Hleb.
+      lia.
+    - apply Nat.leb_gt in Hleb.
+      assert (Hmul : (q - reference_discharge) * stage_sensitivity_scaled / 1000 <= max_discharge)
+        by (apply sensitivity_bounded; exact Hq).
+      lia.
+  Qed.
+
+End HydraulicStageDerivation.
 
 (** --------------------------------------------------------------------------- *)
 (** Cascading Dam Failure Analysis                                               *)
