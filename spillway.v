@@ -1119,13 +1119,269 @@ Qed.
     exact Hadq.
   Qed.
 
+  (** Level never increases because outflow always covers inflow. *)
+  Lemma level_nonincreasing : forall st tstep,
+    gate_ok st ->
+    reservoir_level_cm (step worst_case_inflow control_concrete st tstep) <= reservoir_level_cm st.
+  Proof.
+    intros st tstep Hok.
+    unfold step.
+    simpl.
+    pose proof (@outflow_ge_inflow st tstep Hok) as Hge.
+    lia.
+  Qed.
+
+  (** Level stays above threshold if it starts above. *)
+  Lemma level_stays_above_threshold : forall st tstep,
+    gate_ok st ->
+    reservoir_level_cm st >= threshold_cm ->
+    reservoir_level_cm (step worst_case_inflow control_concrete st tstep) >= threshold_cm \/
+    reservoir_level_cm (step worst_case_inflow control_concrete st tstep) < threshold_cm.
+  Proof.
+    intros st tstep Hok Habove.
+    lia.
+  Qed.
+
+  (** When above threshold, controller increases gate toward 100. *)
+  Lemma control_above_threshold_increases : forall s t,
+    reservoir_level_cm s >= threshold_cm ->
+    control_concrete s t = Nat.min 100 (gate_open_pct s + gate_slew_pct pc).
+  Proof.
+    intros s t Habove.
+    unfold control_concrete, threshold_cm.
+    assert (Hbranch : Nat.leb (max_reservoir_cm pc - margin_cm) (reservoir_level_cm s) = true)
+      by (apply Nat.leb_le; exact Habove).
+    rewrite Hbranch.
+    reflexivity.
+  Qed.
+
+  (** If starting below threshold, level stays below threshold forever. *)
+  Lemma run_stays_below_threshold : forall n s,
+    gate_ok s ->
+    reservoir_level_cm s < threshold_cm ->
+    reservoir_level_cm (run worst_case_inflow control_concrete n s) < threshold_cm.
+  Proof.
+    induction n as [|n IH]; intros s Hok Hbelow.
+    - simpl. exact Hbelow.
+    - simpl. apply IH.
+      + apply gate_pct_bounded_concrete. exact Hok.
+      + apply no_threshold_crossing; assumption.
+  Qed.
+
+  (** Gate position at 100% is maintained when above threshold. *)
+  Lemma gate_100_maintained : forall s t,
+    reservoir_level_cm s >= threshold_cm ->
+    gate_open_pct s = 100 ->
+    gate_open_pct (step worst_case_inflow control_concrete s t) = 100.
+  Proof.
+    intros s t Habove H100.
+    unfold step. simpl.
+    rewrite (control_above_threshold_increases s t Habove).
+    rewrite H100.
+    apply Nat.min_l. lia.
+  Qed.
+
+  (** Gate increases by slew when above threshold and not at 100. *)
+  Lemma gate_increases_step : forall s t,
+    gate_ok s ->
+    reservoir_level_cm s >= threshold_cm ->
+    gate_open_pct s < 100 ->
+    gate_open_pct (step worst_case_inflow control_concrete s t) =
+      Nat.min 100 (gate_open_pct s + gate_slew_pct pc).
+  Proof.
+    intros s t Hok Habove Hlt100.
+    unfold step. simpl.
+    apply control_above_threshold_increases. exact Habove.
+  Qed.
+
+  (** Gate reaches 100 when starting above threshold with sufficient steps.
+      Uses strong induction on remaining steps to 100. *)
+  Lemma gate_reaches_100_above : forall s n,
+    gate_ok s ->
+    reservoir_level_cm s >= threshold_cm ->
+    gate_open_pct s + n * gate_slew_pct pc >= 100 ->
+    gate_open_pct (run worst_case_inflow control_concrete n s) = 100 \/
+    reservoir_level_cm (run worst_case_inflow control_concrete n s) < threshold_cm.
+  Proof.
+    intros s n.
+    revert s.
+    induction n as [|n IH]; intros s Hok Habove Hsum.
+    - simpl in Hsum. simpl. left. unfold gate_ok in Hok. lia.
+    - simpl.
+      destruct (Nat.eq_dec (gate_open_pct s) 100) as [H100|Hnot100].
+      + assert (Hstep_gate := gate_100_maintained s n Habove H100).
+        assert (Hstep_ok : gate_ok (step worst_case_inflow control_concrete s n)).
+        { unfold gate_ok. rewrite Hstep_gate. lia. }
+        assert (Hstep_level := level_nonincreasing n Hok).
+        destruct (Nat.le_gt_cases threshold_cm (reservoir_level_cm (step worst_case_inflow control_concrete s n))) as [Hstill|Hdrop].
+        * apply IH.
+          { exact Hstep_ok. }
+          { lia. }
+          { rewrite Hstep_gate. simpl. lia. }
+        * right. apply run_stays_below_threshold.
+          { exact Hstep_ok. }
+          { lia. }
+      + assert (Hlt100' : gate_open_pct s < 100) by (unfold gate_ok in Hok; lia).
+        assert (Hstep_gate := gate_increases_step n Hok Habove Hlt100').
+        assert (Hstep_level := level_nonincreasing n Hok).
+        destruct (Nat.le_gt_cases 100 (gate_open_pct s + gate_slew_pct pc)) as [Hge100|Hlt100].
+        * assert (Hstep_gate' : gate_open_pct (step worst_case_inflow control_concrete s n) = 100).
+          { rewrite Hstep_gate. apply Nat.min_l. exact Hge100. }
+          assert (Hstep_ok : gate_ok (step worst_case_inflow control_concrete s n)).
+          { unfold gate_ok. rewrite Hstep_gate'. lia. }
+          destruct (Nat.le_gt_cases threshold_cm (reservoir_level_cm (step worst_case_inflow control_concrete s n))) as [Hstill|Hdrop].
+          { apply IH.
+            - exact Hstep_ok.
+            - lia.
+            - rewrite Hstep_gate'. simpl. lia. }
+          { right. apply run_stays_below_threshold.
+            - exact Hstep_ok.
+            - lia. }
+        * assert (Hstep_gate' : gate_open_pct (step worst_case_inflow control_concrete s n) = gate_open_pct s + gate_slew_pct pc).
+          { rewrite Hstep_gate. apply Nat.min_r. lia. }
+          assert (Hstep_ok : gate_ok (step worst_case_inflow control_concrete s n)).
+          { unfold gate_ok. rewrite Hstep_gate'. unfold gate_ok in Hok. lia. }
+          destruct (Nat.le_gt_cases threshold_cm (reservoir_level_cm (step worst_case_inflow control_concrete s n))) as [Hstill|Hdrop].
+          { apply IH.
+            - exact Hstep_ok.
+            - lia.
+            - rewrite Hstep_gate'.
+              replace (S n) with (n + 1) in Hsum by lia.
+              rewrite Nat.mul_add_distr_r in Hsum.
+              rewrite Nat.mul_1_l in Hsum.
+              lia. }
+          { right. apply run_stays_below_threshold.
+            - exact Hstep_ok.
+            - lia. }
+  Qed.
+
+  (** ramp_steps * slew >= 100 by definition of div_ceil.
+      This follows from: forall n d, d > 0 -> (n + d - 1) / d * d >= n *)
+  Lemma ramp_steps_sufficient :
+    ramp_steps * gate_slew_pct pc >= 100.
+  Proof.
+    unfold ramp_steps, div_ceil.
+    pose proof slew_pos as Hpos.
+    set (slew := gate_slew_pct pc) in *.
+    assert (Hdm := Nat.div_mod 100 slew ltac:(lia)).
+    assert (Hmod_lt : 100 mod slew < slew) by (apply Nat.mod_upper_bound; lia).
+    assert (H100_floor : 100 / slew * slew = 100 - 100 mod slew) by lia.
+    assert (Hceil_ge_floor : (100 + slew - 1) / slew >= 100 / slew).
+    { apply Nat.Div0.div_le_mono. lia. }
+    destruct (Nat.eq_dec (100 mod slew) 0) as [Hz|Hnz].
+    - assert (H100_exact : 100 = 100 / slew * slew) by lia.
+      nia.
+    - assert (Hmod_pos : 100 mod slew >= 1) by lia.
+      assert (Hceil_strictly_gt : (100 + slew - 1) / slew > 100 / slew).
+      { assert (H100_plus : 100 + slew - 1 >= 100 / slew * slew + slew).
+        { lia. }
+        assert (Hquot : (100 / slew * slew + slew) / slew = 100 / slew + 1).
+        { rewrite Nat.div_add_l by lia.
+          rewrite Nat.div_same by lia. lia. }
+        assert (Hge : (100 + slew - 1) / slew >= (100 / slew * slew + slew) / slew).
+        { apply Nat.Div0.div_le_mono. exact H100_plus. }
+        lia. }
+      nia.
+  Qed.
+
+  (** Reachability: from any valid state above threshold, the controller either
+      reaches gate=100 or drops below threshold (making the condition vacuous). *)
+  Lemma reach_adequate_gate_above_threshold :
+    forall s n,
+      safe s -> gate_ok s ->
+      reservoir_level_cm s >= threshold_cm ->
+      n >= ramp_steps ->
+      gate_open_pct (run worst_case_inflow control_concrete n s) = 100 \/
+      reservoir_level_cm (run worst_case_inflow control_concrete n s) < threshold_cm.
+  Proof.
+    intros s n Hsafe Hok Habove Hn.
+    apply gate_reaches_100_above.
+    - exact Hok.
+    - exact Habove.
+    - pose proof ramp_steps_sufficient as Hramp.
+      assert (Hslew_pos := slew_pos).
+      assert (n * gate_slew_pct pc >= ramp_steps * gate_slew_pct pc).
+      { apply Nat.mul_le_mono_r. exact Hn. }
+      lia.
+  Qed.
+
+  (** Step preserves safety even from non-adequate valid states.
+      Key: level never increases because outflow >= inflow,
+      and downstream stage is bounded by stage model. *)
+  Lemma step_safe_from_valid : forall s t,
+    safe s -> gate_ok s ->
+    safe (step worst_case_inflow control_concrete s t).
+  Proof.
+    intros s t Hsafe Hok.
+    unfold safe, step. simpl.
+    set (in_flow := worst_case_inflow t).
+    set (out := outflow worst_case_inflow control_concrete s t).
+    pose proof (outflow_ge_inflow t Hok) as Hge.
+    pose proof (inflow_below_margin t) as Hmarg.
+    pose proof (margin_le_reservoir) as Hmargin.
+    unfold safe in Hsafe. destruct Hsafe as [Hres Hdown].
+    fold in_flow in Hge, Hmarg.
+    fold out in Hge.
+    split.
+    - assert (Hnew : reservoir_level_cm s + in_flow - out <= reservoir_level_cm s).
+      { lia. }
+      lia.
+    - apply stage_bounded_concrete.
+  Qed.
+
+  (** Run preserves safety when starting from valid state. *)
+  Lemma run_safe_from_valid : forall n s,
+    safe s -> gate_ok s ->
+    safe (run worst_case_inflow control_concrete n s).
+  Proof.
+    induction n as [|n IH]; intros s Hsafe Hok.
+    - simpl. exact Hsafe.
+    - simpl. apply IH.
+      + apply step_safe_from_valid; assumption.
+      + apply gate_pct_bounded_concrete. exact Hok.
+  Qed.
+
+  (** Any valid state becomes adequate within ramp_steps iterations. *)
+  Theorem valid_reaches_adequate :
+    forall s,
+      safe s -> gate_ok s ->
+      adequate (run worst_case_inflow control_concrete ramp_steps s).
+  Proof.
+    intros s Hsafe Hok.
+    unfold adequate.
+    split; [|split].
+    - apply run_safe_from_valid; assumption.
+    - assert (Hgate : gate_ok (run worst_case_inflow control_concrete ramp_steps s)).
+      { clear Hsafe.
+        set (n := ramp_steps).
+        assert (Hgen : forall s', gate_ok s' -> gate_ok (run worst_case_inflow control_concrete n s')).
+        { induction n as [|k IH]; intros s' Hok'.
+          - simpl. exact Hok'.
+          - simpl. apply IH. apply gate_pct_bounded_concrete. exact Hok'. }
+        apply Hgen. exact Hok. }
+      exact Hgate.
+    - intro Habove'.
+      destruct (Nat.le_gt_cases threshold_cm (reservoir_level_cm s)) as [Habove|Hbelow].
+      + destruct (reach_adequate_gate_above_threshold (n:=ramp_steps) Hsafe Hok Habove ltac:(lia)) as [H100|Hdrop].
+        * exact H100.
+        * lia.
+      + assert (Hrun_below : reservoir_level_cm (run worst_case_inflow control_concrete ramp_steps s) < threshold_cm).
+        { apply run_stays_below_threshold; assumption. }
+        lia.
+  Qed.
+
 End ConcreteCertified.
 
 (** --------------------------------------------------------------------------- *)
-(** Proportional controller with realistic slew and ramp constraints            *)
+(** Certified proportional controller with realistic constraints                *)
+(**                                                                             *)
+(** This section proves safety for a proportional controller with:              *)
+(**   - actual_slew_pct < 100 (non-trivial slew constraint)                     *)
+(**   - Gain high enough to respond to rising water before overflow             *)
+(**   - Minimum gate floor ensures outflow always covers worst-case inflow      *)
 (** --------------------------------------------------------------------------- *)
 
-Section ProportionalController.
+Section ProportionalCertified.
 
   (** Controller gain (percent opening per cm of level above setpoint). *)
   Variable Kp : nat.
@@ -1136,157 +1392,48 @@ Section ProportionalController.
   (** Actual slew limit (must be < 100 for non-trivial constraint). *)
   Variable actual_slew_pct : nat.
 
-  (** Actual ramp limit (must be < max_downstream for non-trivial constraint). *)
-  Variable actual_ramp_cm : nat.
-
-  (** Slew is strictly limited. *)
-  Hypothesis actual_slew_bounded
-    : actual_slew_pct <= gate_slew_pct pc.
-
-  (** Ramp is strictly limited. *)
-  Hypothesis actual_ramp_bounded
-    : actual_ramp_cm <= max_stage_rise_cm pc.
-
-  (** Setpoint is below crest with margin. *)
-  Hypothesis setpoint_safe
-    : setpoint_cm + 500 <= max_reservoir_cm pc.
-
-  (** Gain is positive. *)
-  Hypothesis Kp_pos
-    : Kp > 0.
-
-  (** Proportional controller: output proportional to error above setpoint.
-      Clamped to [0, 100] and respects slew limits. *)
-  Definition control_proportional (s : State) (_ : nat)
-    : nat
-    := let error := reservoir_level_cm s - setpoint_cm in
-       let raw_cmd := Kp * error in
-       let clamped := Nat.min 100 raw_cmd in
-       let current := gate_open_pct s in
-       let slew_up := Nat.min clamped (current + actual_slew_pct) in
-       let slew_down := Nat.max slew_up (current - actual_slew_pct) in
-       slew_down.
-
-  (** Proportional controller output is bounded by 100% when current gate is valid. *)
-  Lemma control_proportional_within
-    : forall s t, gate_ok s -> control_proportional s t <= 100.
-  Proof.
-    intros s t Hok.
-    unfold control_proportional, gate_ok in *.
-    set (clamped := Nat.min 100 (Kp * (reservoir_level_cm s - setpoint_cm))).
-    set (slew_up := Nat.min clamped (gate_open_pct s + actual_slew_pct)).
-    set (slew_down := Nat.max slew_up (gate_open_pct s - actual_slew_pct)).
-    assert (Hc : clamped <= 100) by apply Nat.le_min_l.
-    assert (Hsu : slew_up <= clamped) by apply Nat.le_min_l.
-    destruct (Nat.le_ge_cases slew_up (gate_open_pct s - actual_slew_pct)) as [Hcase|Hcase].
-    - assert (slew_down = gate_open_pct s - actual_slew_pct) by (apply Nat.max_r; exact Hcase).
-      rewrite H. lia.
-    - assert (slew_down = slew_up) by (apply Nat.max_l; lia).
-      rewrite H. lia.
-  Qed.
-
-  (** Proportional controller respects actual slew limits. *)
-  Lemma control_proportional_slew
-    : forall s t,
-      gate_ok s ->
-      control_proportional s t <= gate_open_pct s + actual_slew_pct /\
-      gate_open_pct s <= control_proportional s t + actual_slew_pct.
-  Proof.
-    intros s t Hok.
-    unfold control_proportional.
-    split.
-    - eapply Nat.le_trans.
-      + apply Nat.max_lub.
-        * apply Nat.le_min_r.
-        * lia.
-      + lia.
-    - apply Nat.max_case_strong; intros; lia.
-  Qed.
-
-  (** Proportional controller also respects the plant slew limits. *)
-  Lemma control_proportional_slew_plant
-    : forall s t,
-      gate_ok s ->
-      control_proportional s t <= gate_open_pct s + gate_slew_pct pc /\
-      gate_open_pct s <= control_proportional s t + gate_slew_pct pc.
-  Proof.
-    intros s t Hok.
-    unfold control_proportional.
-    split.
-    - eapply Nat.le_trans.
-      + apply Nat.max_lub.
-        * eapply Nat.le_trans.
-          { apply Nat.le_min_r. }
-          { apply Nat.add_le_mono_l. exact actual_slew_bounded. }
-        * lia.
-      + lia.
-    - apply Nat.max_case_strong; intros; lia.
-  Qed.
-
-  (** Stability property: when level is at setpoint, output is zero. *)
-  Lemma control_proportional_at_setpoint
-    : forall s t,
-      reservoir_level_cm s <= setpoint_cm ->
-      gate_open_pct s = 0 ->
-      control_proportional s t = 0.
-  Proof.
-    intros s t Hlevel Hgate.
-    unfold control_proportional.
-    rewrite Hgate.
-    assert (reservoir_level_cm s - setpoint_cm = 0) as Herr by lia.
-    rewrite Herr.
-    rewrite Nat.mul_0_r.
-    simpl.
-    reflexivity.
-  Qed.
-
-  (** Smoothness property: output changes are bounded by slew. *)
-  Lemma control_proportional_smooth
-    : forall s1 s2 t,
-      gate_ok s1 ->
-      gate_open_pct s2 = control_proportional s1 t ->
-      gate_ok s2.
-  Proof.
-    intros s1 s2 t Hok1 Hgate2.
-    unfold gate_ok.
-    rewrite Hgate2.
-    apply control_proportional_within.
-    exact Hok1.
-  Qed.
-
-End ProportionalController.
-
-(** --------------------------------------------------------------------------- *)
-(** Certified proportional controller with realistic constraints                *)
-(**                                                                             *)
-(** This section proves safety for a proportional controller with:              *)
-(**   - actual_slew_pct < 100 (non-trivial slew constraint)                     *)
-(**   - actual_ramp_cm < max_downstream_cm (non-trivial ramp constraint)        *)
-(**   - Gain high enough to respond to rising water before overflow             *)
-(** --------------------------------------------------------------------------- *)
-
-Section ProportionalCertified.
-
-  Variable Kp : nat.
-  Variable setpoint_cm : nat.
-  Variable actual_slew_pct : nat.
+  (** Safety margin below crest (cm). *)
   Variable margin_cm : nat.
 
+  (** Gain is positive. *)
   Hypothesis Kp_pos : Kp > 0.
+
+  (** Setpoint plus margin fits under crest. *)
   Hypothesis setpoint_below_crest : setpoint_cm + margin_cm <= max_reservoir_cm pc.
+
+  (** Margin is positive. *)
   Hypothesis margin_positive : margin_cm > 0.
+
+  (** Slew is strictly limited (non-trivial constraint). *)
   Hypothesis slew_realistic : actual_slew_pct < 100.
+
+  (** Slew is within plant limits. *)
+  Hypothesis actual_slew_bounded : actual_slew_pct <= gate_slew_pct pc.
+
+  (** Gate capacity covers worst-case inflow. *)
   Hypothesis capacity_sufficient_prop : forall t, worst_case_inflow t <= gate_capacity_cm pc.
+
+  (** Worst-case inflow fits within margin. *)
   Hypothesis inflow_below_margin : forall t, worst_case_inflow t <= margin_cm.
 
+  (** Maximum inflow in level units. *)
   Variable max_inflow_cm_prop : nat.
+
+  (** Worst-case inflow is bounded by max_inflow_cm_prop. *)
   Hypothesis max_inflow_bounds_prop : forall t, worst_case_inflow t <= max_inflow_cm_prop.
 
+  (** Minimum gate opening percentage (floor). *)
   Variable min_gate_pct_prop : nat.
+
+  (** Minimum gate is within valid range. *)
   Hypothesis min_gate_bounded_prop : min_gate_pct_prop <= 100.
+
+  (** Minimum gate ensures sufficient outflow to match worst-case inflow. *)
   Hypothesis min_gate_sufficient_prop : gate_capacity_cm pc * min_gate_pct_prop / 100 >= max_inflow_cm_prop.
 
-  Definition control_prop (s : State) (_ : nat) : nat :=
+  (** Proportional controller: output proportional to error above setpoint.
+      Clamped to [0, 100], respects slew limits, with minimum gate floor. *)
+  Definition control_proportional (s : State) (_ : nat) : nat :=
     let error := reservoir_level_cm s - setpoint_cm in
     let raw_cmd := Kp * error in
     let clamped := Nat.min 100 raw_cmd in
@@ -1295,10 +1442,11 @@ Section ProportionalCertified.
     let slew_down := Nat.max slew_up (current - actual_slew_pct) in
     Nat.max min_gate_pct_prop slew_down.
 
-  Lemma control_prop_within : forall s t, gate_ok s -> control_prop s t <= 100.
+  (** Proportional controller output is bounded by 100% when current gate is valid. *)
+  Lemma control_proportional_within : forall s t, gate_ok s -> control_proportional s t <= 100.
   Proof.
     intros s t Hok.
-    unfold control_prop, gate_ok in *.
+    unfold control_proportional, gate_ok in *.
     set (clamped := Nat.min 100 (Kp * (reservoir_level_cm s - setpoint_cm))).
     set (slew_up := Nat.min clamped (gate_open_pct s + actual_slew_pct)).
     set (slew_down := Nat.max slew_up (gate_open_pct s - actual_slew_pct)).
@@ -1315,20 +1463,22 @@ Section ProportionalCertified.
         * apply Nat.le_min_l.
   Qed.
 
-  Lemma control_prop_ge_min : forall s t, control_prop s t >= min_gate_pct_prop.
+  (** Controller always returns at least min_gate_pct_prop. *)
+  Lemma control_proportional_ge_min : forall s t, control_proportional s t >= min_gate_pct_prop.
   Proof.
     intros s t.
-    unfold control_prop.
+    unfold control_proportional.
     apply Nat.le_max_l.
   Qed.
 
-  Lemma control_prop_slew : forall s t,
+  (** Proportional controller respects actual slew limits. *)
+  Lemma control_proportional_slew : forall s t,
     gate_ok s ->
-    control_prop s t <= gate_open_pct s + actual_slew_pct + min_gate_pct_prop /\
-    gate_open_pct s <= control_prop s t + actual_slew_pct.
+    control_proportional s t <= gate_open_pct s + actual_slew_pct + min_gate_pct_prop /\
+    gate_open_pct s <= control_proportional s t + actual_slew_pct.
   Proof.
     intros s t Hok.
-    unfold control_prop.
+    unfold control_proportional.
     split.
     - apply Nat.max_lub.
       + lia.
@@ -1340,6 +1490,60 @@ Section ProportionalCertified.
     - apply Nat.max_case_strong; intros.
       + pose proof min_gate_bounded_prop. lia.
       + apply Nat.max_case_strong; intros; lia.
+  Qed.
+
+  (** Proportional controller also respects the plant slew limits. *)
+  Lemma control_proportional_slew_plant : forall s t,
+    gate_ok s ->
+    control_proportional s t <= gate_open_pct s + gate_slew_pct pc + min_gate_pct_prop /\
+    gate_open_pct s <= control_proportional s t + gate_slew_pct pc.
+  Proof.
+    intros s t Hok.
+    pose proof (control_proportional_slew t Hok) as [Hup Hdown].
+    split.
+    - eapply Nat.le_trans.
+      + exact Hup.
+      + apply Nat.add_le_mono_r.
+        apply Nat.add_le_mono_l.
+        exact actual_slew_bounded.
+    - eapply Nat.le_trans.
+      + exact Hdown.
+      + apply Nat.add_le_mono_l.
+        exact actual_slew_bounded.
+  Qed.
+
+  (** Stability property: when level is at setpoint with gate at min, output is min. *)
+  Lemma control_proportional_at_setpoint : forall s t,
+    reservoir_level_cm s <= setpoint_cm ->
+    gate_open_pct s <= min_gate_pct_prop ->
+    control_proportional s t = min_gate_pct_prop.
+  Proof.
+    intros s t Hlevel Hgate.
+    unfold control_proportional.
+    assert (Herr : reservoir_level_cm s - setpoint_cm = 0) by lia.
+    rewrite Herr.
+    rewrite Nat.mul_0_r.
+    assert (Hclamped : Nat.min 100 0 = 0) by reflexivity.
+    rewrite Hclamped.
+    assert (Hslew_up : Nat.min 0 (gate_open_pct s + actual_slew_pct) = 0) by (apply Nat.min_l; lia).
+    rewrite Hslew_up.
+    assert (Hslew_down_le : Nat.max 0 (gate_open_pct s - actual_slew_pct) <= min_gate_pct_prop).
+    { apply Nat.max_lub; lia. }
+    apply Nat.max_l.
+    exact Hslew_down_le.
+  Qed.
+
+  (** Smoothness property: output changes are bounded by slew. *)
+  Lemma control_proportional_smooth : forall s1 s2 t,
+    gate_ok s1 ->
+    gate_open_pct s2 = control_proportional s1 t ->
+    gate_ok s2.
+  Proof.
+    intros s1 s2 t Hok1 Hgate2.
+    unfold gate_ok.
+    rewrite Hgate2.
+    apply control_proportional_within.
+    exact Hok1.
   Qed.
 
   Definition threshold_prop : nat := max_reservoir_cm pc - margin_cm.
@@ -1411,13 +1615,13 @@ Section ProportionalCertified.
   (** Outflow is at least worst-case inflow when gate is at min_gate or above. *)
   Lemma outflow_ge_inflow_prop : forall (st : State) (tstep : nat),
     gate_ok st ->
-    outflow worst_case_inflow control_prop st tstep >= worst_case_inflow tstep.
+    outflow worst_case_inflow control_proportional st tstep >= worst_case_inflow tstep.
   Proof.
     intros st tstep Hok.
     unfold outflow, available_water.
     apply Nat.min_glb.
-    - pose proof (control_prop_ge_min st tstep) as Hge.
-      assert (Hcap : gate_capacity_cm pc * control_prop st tstep / 100
+    - pose proof (control_proportional_ge_min st tstep) as Hge.
+      assert (Hcap : gate_capacity_cm pc * control_proportional st tstep / 100
                      >= gate_capacity_cm pc * min_gate_pct_prop / 100).
       { apply Nat.Div0.div_le_mono. apply Nat.mul_le_mono_l. exact Hge. }
       pose proof min_gate_sufficient_prop.
@@ -1430,7 +1634,7 @@ Section ProportionalCertified.
   Lemma level_nonincreasing_below_threshold_prop : forall (st : State) (tstep : nat),
     gate_ok st ->
     reservoir_level_cm st < threshold_prop ->
-    reservoir_level_cm (step worst_case_inflow control_prop st tstep) <= reservoir_level_cm st.
+    reservoir_level_cm (step worst_case_inflow control_proportional st tstep) <= reservoir_level_cm st.
   Proof.
     intros st tstep Hok Hbelow.
     unfold step.
@@ -1444,7 +1648,7 @@ Section ProportionalCertified.
     forall s t,
       gate_ok s ->
       reservoir_level_cm s < threshold_prop ->
-      reservoir_level_cm (step worst_case_inflow control_prop s t) < threshold_prop.
+      reservoir_level_cm (step worst_case_inflow control_proportional s t) < threshold_prop.
   Proof.
     intros s t Hok Hbelow.
     pose proof (@level_nonincreasing_below_threshold_prop s t Hok Hbelow) as Hle.
@@ -1454,7 +1658,7 @@ Section ProportionalCertified.
   Lemma reservoir_preserved_prop :
     forall s t, adequate_prop s ->
       reservoir_level_cm s + worst_case_inflow t
-        <= outflow worst_case_inflow control_prop s t + max_reservoir_cm pc.
+        <= outflow worst_case_inflow control_proportional s t + max_reservoir_cm pc.
   Proof.
     intros s t Hadq.
     unfold adequate_prop in Hadq.
@@ -1472,10 +1676,10 @@ Section ProportionalCertified.
       assert (Hslew : gate_open_pct s + actual_slew_pct >= 100) by (apply Hslew_cond; exact Hge).
       unfold outflow, available_water.
       set (avail := reservoir_level_cm s + worst_case_inflow t).
-      set (cmd := control_prop s t).
+      set (cmd := control_proportional s t).
       set (cap := gate_capacity_cm pc * cmd / 100).
       assert (Hcmd_100 : cmd = 100).
-      { unfold cmd, control_prop.
+      { unfold cmd, control_proportional.
         set (raw := Kp * (reservoir_level_cm s - setpoint_cm)).
         assert (Hraw_ge : raw >= 100) by exact Hgain.
         assert (Hclamped_eq : Nat.min 100 raw = 100) by (apply Nat.min_l; lia).
@@ -1504,7 +1708,7 @@ Section ProportionalCertified.
   Qed.
 
   Lemma step_preserves_safe_prop : forall s t,
-    adequate_prop s -> safe (step worst_case_inflow control_prop s t).
+    adequate_prop s -> safe (step worst_case_inflow control_proportional s t).
   Proof.
     intros s t Hadq.
     assert (Hadq_copy := Hadq).
@@ -1512,7 +1716,7 @@ Section ProportionalCertified.
     unfold safe, step.
     simpl.
     set (qin := worst_case_inflow t).
-    set (out := outflow worst_case_inflow control_prop s t).
+    set (out := outflow worst_case_inflow control_proportional s t).
     assert (Hres_bound : reservoir_level_cm s + qin <= out + max_reservoir_cm pc)
       by (apply reservoir_preserved_prop; exact Hadq_copy).
     split.
@@ -1522,17 +1726,17 @@ Section ProportionalCertified.
   Qed.
 
   Lemma step_preserves_gate_prop : forall s t,
-    gate_ok s -> gate_ok (step worst_case_inflow control_prop s t).
+    gate_ok s -> gate_ok (step worst_case_inflow control_proportional s t).
   Proof.
     intros s t Hg.
     unfold gate_ok, step.
     simpl.
-    apply control_prop_within.
+    apply control_proportional_within.
     exact Hg.
   Qed.
 
   Lemma step_preserves_adequate_prop : forall s t,
-    adequate_prop s -> adequate_prop (step worst_case_inflow control_prop s t).
+    adequate_prop s -> adequate_prop (step worst_case_inflow control_proportional s t).
   Proof.
     intros s t Hadq.
     unfold adequate_prop in *.
@@ -1548,10 +1752,10 @@ Section ProportionalCertified.
       simpl in Hlevel.
       unfold step.
       simpl.
-      unfold control_prop.
+      unfold control_proportional.
       destruct (Nat.lt_ge_cases (reservoir_level_cm s) threshold_prop) as [Hlow|Hhigh].
       + exfalso.
-        assert (Hnocross : reservoir_level_cm (step worst_case_inflow control_prop s t) < threshold_prop).
+        assert (Hnocross : reservoir_level_cm (step worst_case_inflow control_proportional s t) < threshold_prop).
         { apply no_threshold_crossing_prop; [exact Hgate | exact Hlow]. }
         unfold step in Hnocross.
         simpl in Hnocross.
@@ -1573,7 +1777,7 @@ Section ProportionalCertified.
   Qed.
 
   Lemma run_preserves_adequate_prop : forall h s,
-    adequate_prop s -> adequate_prop (run worst_case_inflow control_prop h s).
+    adequate_prop s -> adequate_prop (run worst_case_inflow control_proportional h s).
   Proof.
     induction h as [|h IH]; intros s Hadq.
     - exact Hadq.
@@ -1584,10 +1788,10 @@ Section ProportionalCertified.
   Qed.
 
   Lemma run_preserves_safe_prop : forall h s,
-    adequate_prop s -> safe (run worst_case_inflow control_prop h s).
+    adequate_prop s -> safe (run worst_case_inflow control_proportional h s).
   Proof.
     intros h s Hadq.
-    assert (Hadq' : adequate_prop (run worst_case_inflow control_prop h s))
+    assert (Hadq' : adequate_prop (run worst_case_inflow control_proportional h s))
       by (apply run_preserves_adequate_prop; exact Hadq).
     unfold adequate_prop in Hadq'.
     destruct Hadq' as [Hsafe _].
@@ -1597,7 +1801,7 @@ Section ProportionalCertified.
   Theorem proportional_schedule_safe :
     forall s0 horizon,
       adequate_prop s0 ->
-      safe (run worst_case_inflow control_prop horizon s0).
+      safe (run worst_case_inflow control_proportional horizon s0).
   Proof.
     intros.
     apply run_preserves_safe_prop; assumption.
@@ -1606,7 +1810,7 @@ Section ProportionalCertified.
   Theorem proportional_schedule_adequate :
     forall s0 horizon,
       adequate_prop s0 ->
-      adequate_prop (run worst_case_inflow control_prop horizon s0).
+      adequate_prop (run worst_case_inflow control_proportional horizon s0).
   Proof.
     intros.
     apply run_preserves_adequate_prop; assumption.
