@@ -20,7 +20,7 @@
      [x] Formalize forecast error relationship
      [x] Add actuator dynamics model
      [x] Derive stage model from hydraulic physics
-     [ ] Extend step_mg to track per-gate state
+     [x] Extend step_mg to track per-gate state
      [ ] Add MPC variant
      [ ] Add probabilistic uncertainty quantification
      [ ] Prove controller optimality
@@ -2285,6 +2285,151 @@ Section MultiGate.
   Proof. intros; eapply run_mg_preserves_valid; eauto. Qed.
 
 End MultiGate.
+
+(** --------------------------------------------------------------------------- *)
+(** Per-Gate State Tracking                                                       *)
+(**                                                                              *)
+(** Extends the multi-gate model to track individual gate positions in state.    *)
+(** This enables per-gate slew rate enforcement and failure mode modeling.       *)
+(** --------------------------------------------------------------------------- *)
+
+Section PerGateState.
+
+  (** Number of spillway gates. *)
+  Variable gate_count_pg : nat.
+  Hypothesis gate_count_pos_pg : gate_count_pg > 0.
+
+  (** Per-gate capacity. *)
+  Variable gate_capacity_per_gate_pg : nat.
+
+  (** Extended state with per-gate positions. *)
+  Record MGState := mkMGState {
+    mg_reservoir_cm : nat;
+    mg_downstream_cm : nat;
+    mg_gate_positions : list nat
+  }.
+
+  (** All gate positions are in [0, 100]. *)
+  Definition mg_gates_ok (s : MGState) : Prop :=
+    length (mg_gate_positions s) = gate_count_pg /\
+    Forall (fun pct => pct <= 100) (mg_gate_positions s).
+
+  (** Reservoir and downstream within bounds. *)
+  Definition mg_safe (s : MGState) : Prop :=
+    mg_reservoir_cm s <= max_reservoir_cm pc /\
+    mg_downstream_cm s <= max_downstream_cm pc.
+
+  (** Valid multi-gate state. *)
+  Definition mg_valid (s : MGState) : Prop :=
+    mg_safe s /\ mg_gates_ok s.
+
+  (** Sum of gate positions. *)
+  Fixpoint sum_positions (gs : list nat) : nat :=
+    match gs with
+    | nil => 0
+    | g :: rest => g + sum_positions rest
+    end.
+
+  (** Average gate position for compatibility with single-gate model. *)
+  Definition mg_average_gate_pct (s : MGState) : nat :=
+    sum_positions (mg_gate_positions s) / gate_count_pg.
+
+  (** Per-gate slew rate limit. *)
+  Variable gate_slew_pct_pg : nat.
+
+  (** Check if new positions respect slew rate from old positions. *)
+  Fixpoint positions_slew_ok (old_pos new_pos : list nat) : Prop :=
+    match old_pos, new_pos with
+    | nil, nil => True
+    | o :: old_rest, n :: new_rest =>
+        n <= o + gate_slew_pct_pg /\
+        o <= n + gate_slew_pct_pg /\
+        positions_slew_ok old_rest new_rest
+    | _, _ => False
+    end.
+
+  (** Per-gate controller. *)
+  Variable control_pg : MGState -> nat -> list nat.
+
+  (** Controller respects gate count. *)
+  Hypothesis control_pg_length :
+    forall s t, length (control_pg s t) = gate_count_pg.
+
+  (** Controller respects bounds. *)
+  Hypothesis control_pg_bounded :
+    forall s t, Forall (fun pct => pct <= 100) (control_pg s t).
+
+  (** Controller respects slew rate. *)
+  Hypothesis control_pg_slew :
+    forall s t, mg_gates_ok s -> positions_slew_ok (mg_gate_positions s) (control_pg s t).
+
+  (** Worst-case inflow. *)
+  Variable worst_case_inflow_pg : nat -> nat.
+
+  (** Stage from outflow. *)
+  Variable stage_from_outflow_pg : nat -> nat.
+
+  (** Aggregate outflow capacity. *)
+  Definition outflow_capacity_pg (gs : list nat) : nat :=
+    gate_capacity_per_gate_pg * sum_positions gs / 100.
+
+  (** Available water. *)
+  Definition available_water_pg (s : MGState) (t : nat) : nat :=
+    mg_reservoir_cm s + worst_case_inflow_pg t.
+
+  (** Outflow: min of capacity and availability. *)
+  Definition outflow_pg (s : MGState) (t : nat) : nat :=
+    let gs := control_pg s t in
+    Nat.min (outflow_capacity_pg gs) (available_water_pg s t).
+
+  (** Per-gate step function. *)
+  Definition step_pg (s : MGState) (t : nat) : MGState :=
+    let new_positions := control_pg s t in
+    let inflow := worst_case_inflow_pg t in
+    let out := outflow_pg s t in
+    let new_res := mg_reservoir_cm s + inflow - out in
+    let new_stage := stage_from_outflow_pg out in
+    {| mg_reservoir_cm := new_res;
+       mg_downstream_cm := new_stage;
+       mg_gate_positions := new_positions |}.
+
+  (** Per-gate run over horizon. *)
+  Fixpoint run_pg (h : nat) (s : MGState) : MGState :=
+    match h with
+    | O => s
+    | S k => run_pg k (step_pg s k)
+    end.
+
+  (** Step preserves gate validity. *)
+  Lemma step_pg_preserves_gates_ok :
+    forall s t, mg_gates_ok s -> mg_gates_ok (step_pg s t).
+  Proof.
+    intros s t Hok.
+    unfold mg_gates_ok, step_pg. simpl.
+    split.
+    - apply control_pg_length.
+    - apply control_pg_bounded.
+  Qed.
+
+  (** Extract individual gate position. *)
+  Definition get_gate_pct (s : MGState) (i : nat) : nat :=
+    nth i (mg_gate_positions s) 0.
+
+  (** Individual gate position bounded. *)
+  Lemma get_gate_pct_bounded :
+    forall s i,
+      mg_gates_ok s ->
+      i < gate_count_pg ->
+      get_gate_pct s i <= 100.
+  Proof.
+    intros s i [Hlen Hforall] Hi.
+    unfold get_gate_pct.
+    apply Forall_nth.
+    - exact Hforall.
+    - rewrite Hlen. exact Hi.
+  Qed.
+
+End PerGateState.
 
 (** --------------------------------------------------------------------------- *)
 (** Signed-flow (Z) variant to reason about negative margins / offsets          *)
