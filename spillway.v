@@ -2140,9 +2140,10 @@ Section SignedFlow.
   Definition max_outflow_change_z : Z :=
     z_gate_capacity_cm * z_gate_slew_pct / 100.
 
-  (** Stage rise allowance covers maximum stage change from outflow change. *)
+  (** Stage rise allowance covers maximum stage change from outflow change.
+      Includes +1 to account for integer division rounding in outflow calculations. *)
   Hypothesis stage_rise_covers_change :
-    z_stage_gain * max_outflow_change_z <= z_max_stage_rise_cm.
+    z_stage_gain * (max_outflow_change_z + 1) <= z_max_stage_rise_cm.
 
   (** Prior outflow that produced the current downstream stage.
       For derivation, we assume the current state's downstream_stage_cm
@@ -2163,12 +2164,149 @@ Section SignedFlow.
   Hypothesis prior_outflow_capacity_limited :
     forall s, prior_outflow_z s = z_gate_capacity_cm * z_gate_pct s / 100.
 
-  (** Outflow change is bounded by gate slew.
-      This follows from prior_outflow_capacity_limited and control_slew_limited_z,
-      accounting for integer division rounding. *)
-  Hypothesis outflow_change_bounded :
+
+  (** Micro-lemma: Division remainder is bounded. *)
+  Lemma div_mod_eq : forall a b, b > 0 -> a = b * (a / b) + a mod b.
+  Proof. intros. apply Z.div_mod. lia. Qed.
+
+  (** Micro-lemma: Mod is nonnegative for positive divisor and nonneg dividend. *)
+  Lemma mod_nonneg : forall a b, b > 0 -> 0 <= a -> 0 <= a mod b.
+  Proof. intros. apply Z.mod_pos_bound. lia. Qed.
+
+  (** Micro-lemma: Mod is less than divisor. *)
+  Lemma mod_lt : forall a b, b > 0 -> 0 <= a -> a mod b < b.
+  Proof. intros. apply Z.mod_pos_bound. lia. Qed.
+
+  (** Micro-lemma: Division difference upper bound when a >= b >= 0. *)
+  Lemma div_diff_upper_nonneg : forall a b d, d > 0 -> 0 <= b -> b <= a ->
+    a / d - b / d <= (a - b) / d + 1.
+  Proof.
+    intros a b d Hd Hb Hba.
+    assert (Ha_eq := Z.div_mod a d ltac:(lia)).
+    assert (Hb_eq := Z.div_mod b d ltac:(lia)).
+    assert (Hmod_a := Z.mod_pos_bound a d ltac:(lia)).
+    assert (Hmod_b := Z.mod_pos_bound b d ltac:(lia)).
+    assert (Hdiff := Z.div_mod (a - b) d ltac:(lia)).
+    assert (Hmod_diff := Z.mod_pos_bound (a - b) d ltac:(lia)).
+    nia.
+  Qed.
+
+  (** Micro-lemma: Division difference lower bound when a >= b >= 0. *)
+  Lemma div_diff_lower_nonneg : forall a b d, d > 0 -> 0 <= b -> b <= a ->
+    (a - b) / d <= a / d - b / d.
+  Proof.
+    intros a b d Hd Hb Hba.
+    assert (Ha_eq := Z.div_mod a d ltac:(lia)).
+    assert (Hb_eq := Z.div_mod b d ltac:(lia)).
+    assert (Hmod_a := Z.mod_pos_bound a d ltac:(lia)).
+    assert (Hmod_b := Z.mod_pos_bound b d ltac:(lia)).
+    assert (Hdiff := Z.div_mod (a - b) d ltac:(lia)).
+    assert (Hmod_diff := Z.mod_pos_bound (a - b) d ltac:(lia)).
+    nia.
+  Qed.
+
+  (** Micro-lemma: Division of negative is bounded above by 0. *)
+  Lemma div_neg_upper : forall a d, d > 0 -> a < 0 -> a / d <= 0.
+  Proof.
+    intros a d Hd Ha.
+    apply Z.div_le_upper_bound; [lia|].
+    lia.
+  Qed.
+
+  (** Micro-lemma: Division of negative is bounded below by -1 when a > -d. *)
+  Lemma div_neg_lower : forall a d, d > 0 -> -d < a -> a < 0 -> -1 <= a / d.
+  Proof.
+    intros a d Hd Hlow Ha.
+    apply Z.div_le_lower_bound; [lia|].
+    lia.
+  Qed.
+
+  (** Micro-lemma: Absolute value of division difference. *)
+  Lemma abs_div_diff_bound : forall a b d, d > 0 -> 0 <= a -> 0 <= b ->
+    Z.abs (a / d - b / d) <= Z.abs (a - b) / d + 1.
+  Proof.
+    intros a b d Hd Ha Hb.
+    destruct (Z.le_gt_cases b a) as [Hba|Hab].
+    - assert (Hdiv_mono : b / d <= a / d) by (apply Z.div_le_mono; lia).
+      rewrite Z.abs_eq by lia.
+      rewrite Z.abs_eq by lia.
+      apply div_diff_upper_nonneg; lia.
+    - assert (Hdiv_mono : a / d <= b / d) by (apply Z.div_le_mono; lia).
+      rewrite (Z.abs_neq (a / d - b / d)) by lia.
+      replace (- (a / d - b / d)) with (b / d - a / d) by lia.
+      rewrite (Z.abs_neq (a - b)) by lia.
+      replace (- (a - b)) with (b - a) by lia.
+      apply div_diff_upper_nonneg; lia.
+  Qed.
+
+  (** Micro-lemma: Multiplication preserves absolute value bound. *)
+  Lemma abs_mul_bound : forall c x y, c >= 0 -> Z.abs x <= y ->
+    Z.abs (c * x) <= c * y.
+  Proof.
+    intros c x y Hc Hxy.
+    rewrite Z.abs_mul.
+    rewrite Z.abs_eq by lia.
+    apply Z.mul_le_mono_nonneg_l; lia.
+  Qed.
+
+  (** Micro-lemma: Division preserves inequality. *)
+  Lemma div_mono : forall a b d, d > 0 -> a <= b -> a / d <= b / d.
+  Proof. intros. apply Z.div_le_mono; lia. Qed.
+
+  (** Micro-lemma: When c is between b and a, |c - b| <= |a - b|. *)
+  Lemma abs_squeeze : forall a b c, b <= c -> c <= a -> Z.abs (c - b) <= Z.abs (a - b).
+  Proof.
+    intros a b c Hbc Hca.
+    rewrite Z.abs_eq by lia.
+    rewrite Z.abs_eq by lia.
+    lia.
+  Qed.
+
+  (** Reservoir always has enough water to discharge at commanded rate.
+      This is a design constraint: the reservoir must be sized to handle flows. *)
+  Hypothesis availability_sufficient :
     forall s t, safe_z s -> gate_ok_z s ->
-      Z.abs (outflow_z control_z s t - prior_outflow_z s) <= max_outflow_change_z.
+      available_water_z s t >= z_gate_capacity_cm * control_z s t / 100.
+
+  (** Derived: Outflow change is bounded by gate slew plus rounding.
+      Uses prior_outflow_capacity_limited, control_slew_limited_z, and availability_sufficient.
+      The +1 accounts for integer division rounding in capacity calculations. *)
+  Lemma outflow_change_bounded :
+    forall s t, safe_z s -> gate_ok_z s ->
+      Z.abs (outflow_z control_z s t - prior_outflow_z s) <= max_outflow_change_z + 1.
+  Proof.
+    intros s0 t0 Hsafe Hgate.
+    unfold outflow_z, max_outflow_change_z.
+    rewrite prior_outflow_capacity_limited.
+    set (new_cap := z_gate_capacity_cm * control_z s0 t0 / 100).
+    set (old_cap := z_gate_capacity_cm * z_gate_pct s0 / 100).
+    set (avail := available_water_z s0 t0).
+    assert (Hslew : - z_gate_slew_pct <= control_z s0 t0 - z_gate_pct s0 <= z_gate_slew_pct)
+      by (apply control_slew_limited_z; exact Hgate).
+    assert (Hctrl_bounds : 0 <= control_z s0 t0 <= 100) by apply control_within_bounds_z.
+    unfold gate_ok_z in Hgate.
+    assert (Hnew_nonneg : 0 <= z_gate_capacity_cm * control_z s0 t0) by nia.
+    assert (Hold_nonneg : 0 <= z_gate_capacity_cm * z_gate_pct s0) by nia.
+    assert (Hnew_cap_lo : 0 <= new_cap) by (unfold new_cap; apply Z.div_pos; lia).
+    assert (Hold_cap_lo : 0 <= old_cap) by (unfold old_cap; apply Z.div_pos; lia).
+    assert (Hdiff_ctrl : Z.abs (control_z s0 t0 - z_gate_pct s0) <= z_gate_slew_pct).
+    { apply Z.abs_le. lia. }
+    assert (Hprod_bound : Z.abs (z_gate_capacity_cm * control_z s0 t0 - z_gate_capacity_cm * z_gate_pct s0)
+                          <= z_gate_capacity_cm * z_gate_slew_pct).
+    { replace (z_gate_capacity_cm * control_z s0 t0 - z_gate_capacity_cm * z_gate_pct s0)
+        with (z_gate_capacity_cm * (control_z s0 t0 - z_gate_pct s0)) by ring.
+      apply abs_mul_bound; lia. }
+    assert (Habs_div_bound : Z.abs (new_cap - old_cap) <= z_gate_capacity_cm * z_gate_slew_pct / 100 + 1).
+    { unfold new_cap, old_cap.
+      eapply Z.le_trans.
+      - apply abs_div_diff_bound; lia.
+      - apply Z.add_le_mono_r.
+        apply div_mono; [lia | exact Hprod_bound]. }
+    assert (Havail_ge : avail >= new_cap).
+    { unfold avail, new_cap. apply availability_sufficient; assumption. }
+    rewrite Z.min_l by lia.
+    exact Habs_div_bound.
+  Qed.
 
   (** Derived: Integer stage ramp limit holds for one step. *)
   Lemma stage_ramp_preserved_z :
@@ -2219,7 +2357,7 @@ Section SignedFlow.
       apply Z.le_trans with (m := z_stage_gain * Z.abs (out - pout)).
       - apply Z.mul_le_mono_nonneg_l; [lia|].
         destruct (Z.abs_spec (out - pout)) as [[_ Heq]|[_ Heq]]; lia.
-      - apply Z.le_trans with (m := z_stage_gain * max_outflow_change_z).
+      - apply Z.le_trans with (m := z_stage_gain * (max_outflow_change_z + 1)).
         + apply Z.mul_le_mono_nonneg_l; [lia|exact Hchange].
         + exact stage_rise_covers_change. }
     lia.
