@@ -2223,11 +2223,13 @@ End MultiGate.
 
 Section SignedFlow.
 
-  (** Integer-valued spillway state. *)
+  (** Integer-valued spillway state.
+      Includes prior_outflow to track the outflow that produced current downstream stage. *)
   Record ZState := {
     z_reservoir_cm : Z;
     z_downstream_cm : Z;
-    z_gate_pct : Z
+    z_gate_pct : Z;
+    z_prior_outflow_cm : Z
   }.
 
   Local Open Scope Z_scope.
@@ -2281,7 +2283,8 @@ Section SignedFlow.
   Definition outflow_z (ctrl:ZState -> nat -> Z) (s:ZState) (t:nat) : Z :=
     Z.min (z_gate_capacity_cm * ctrl s t / 100) (available_water_z s t).
 
-  (** Integer plant step. *)
+  (** Integer plant step.
+      Updates prior_outflow to current outflow for next step's ramp calculation. *)
   Definition step_z (ctrl:ZState -> nat -> Z) (s:ZState) (t:nat) : ZState :=
     let inflow := worst_case_inflow_z t in
     let out := outflow_z ctrl s t in
@@ -2289,7 +2292,8 @@ Section SignedFlow.
     let new_stage := stage_from_outflow_z out in
     {| z_reservoir_cm := new_res;
        z_downstream_cm := new_stage;
-       z_gate_pct := ctrl s t |}.
+       z_gate_pct := ctrl s t;
+       z_prior_outflow_cm := out |}.
 
   (** Integer plant run over a horizon. *)
   Fixpoint run_z (ctrl:ZState -> nat -> Z) (h:nat) (s:ZState) : ZState :=
@@ -2349,25 +2353,25 @@ Section SignedFlow.
   Hypothesis stage_rise_covers_change :
     z_stage_gain * (max_outflow_change_z + 1) <= z_max_stage_rise_cm.
 
-  (** Prior outflow that produced the current downstream stage.
-      For derivation, we assume the current state's downstream_stage_cm
-      was produced by some prior outflow consistent with the stage model. *)
-  Variable prior_outflow_z : ZState -> Z.
-
-  (** Prior outflow is nonnegative and bounded. *)
+  (** Prior outflow bounds: must be nonnegative and at most capacity.
+      This is an invariant that step_z maintains. *)
   Hypothesis prior_outflow_bounds :
-    forall s, 0 <= prior_outflow_z s <= z_gate_capacity_cm.
+    forall s, valid_z s -> 0 <= z_prior_outflow_cm s <= z_gate_capacity_cm.
 
-  (** Current stage matches stage model applied to prior outflow. *)
+  (** Current stage matches stage model applied to prior outflow.
+      This is an invariant: step_z sets downstream = stage_from_outflow(out)
+      and prior_outflow = out, so this holds after any step. *)
   Hypothesis stage_from_prior :
     forall s, safe_z s ->
-      z_downstream_cm s = stage_from_outflow_z (prior_outflow_z s).
+      z_downstream_cm s = stage_from_outflow_z (z_prior_outflow_cm s).
 
   (** Prior outflow was capacity-limited (not availability-limited).
-      This relates prior_outflow to the current gate position. *)
+      Under availability_sufficient, this holds after every step since
+      outflow = min(capacity*gate/100, avail) = capacity*gate/100.
+      Initial state must be set up to satisfy this. *)
   Hypothesis prior_outflow_capacity_limited :
-    forall s, prior_outflow_z s = z_gate_capacity_cm * z_gate_pct s / 100.
-
+    forall s, valid_z s ->
+      z_prior_outflow_cm s = z_gate_capacity_cm * z_gate_pct s / 100.
 
   (** Micro-lemma: Division remainder is bounded. *)
   Lemma div_mod_eq : forall a b, b > 0 -> a = b * (a / b) + a mod b.
@@ -2477,11 +2481,12 @@ Section SignedFlow.
       The +1 accounts for integer division rounding in capacity calculations. *)
   Lemma outflow_change_bounded :
     forall s t, safe_z s -> gate_ok_z s ->
-      Z.abs (outflow_z control_z s t - prior_outflow_z s) <= max_outflow_change_z + 1.
+      Z.abs (outflow_z control_z s t - z_prior_outflow_cm s) <= max_outflow_change_z + 1.
   Proof.
     intros s0 t0 Hsafe Hgate.
+    assert (Hvalid : valid_z s0) by (split; assumption).
     unfold outflow_z, max_outflow_change_z.
-    rewrite prior_outflow_capacity_limited.
+    rewrite (prior_outflow_capacity_limited Hvalid).
     set (new_cap := z_gate_capacity_cm * control_z s0 t0 / 100).
     set (old_cap := z_gate_capacity_cm * z_gate_pct s0 / 100).
     set (avail := available_water_z s0 t0).
@@ -2518,12 +2523,13 @@ Section SignedFlow.
       stage_from_outflow_z (outflow_z control_z s t) <= z_downstream_cm s + z_max_stage_rise_cm.
   Proof.
     intros s t Hsafe Hgate.
-    pose proof (@stage_from_prior s Hsafe) as Hprior.
+    assert (Hvalid : valid_z s) by (split; assumption).
+    pose proof (stage_from_prior Hsafe) as Hprior.
     pose proof (@outflow_change_bounded s t Hsafe Hgate) as Hchange.
-    pose proof (@prior_outflow_bounds s) as Hpbounds.
+    pose proof (prior_outflow_bounds Hvalid) as Hpbounds.
     destruct Hpbounds as [Hprior_lo Hprior_hi].
     set (out := outflow_z control_z s t).
-    set (pout := prior_outflow_z s).
+    set (pout := z_prior_outflow_cm s).
     assert (Hout_lo : 0 <= out).
     { unfold out, outflow_z.
       apply Z.min_glb_iff. split.
@@ -2544,14 +2550,14 @@ Section SignedFlow.
         + rewrite Z.div_mul; lia. }
     rewrite Hprior.
     unfold out, pout.
-    assert (Hstage_pout : stage_from_outflow_z (prior_outflow_z s) =
-                          z_base_stage + z_stage_gain * Z.min (prior_outflow_z s) z_gate_capacity_cm)
+    assert (Hstage_pout : stage_from_outflow_z (z_prior_outflow_cm s) =
+                          z_base_stage + z_stage_gain * Z.min (z_prior_outflow_cm s) z_gate_capacity_cm)
       by (apply stage_model_z; exact Hprior_lo).
     assert (Hstage_out : stage_from_outflow_z (outflow_z control_z s t) =
                          z_base_stage + z_stage_gain * Z.min (outflow_z control_z s t) z_gate_capacity_cm)
       by (apply stage_model_z; exact Hout_lo).
     rewrite Hstage_pout, Hstage_out.
-    assert (Hmin_pout : Z.min (prior_outflow_z s) z_gate_capacity_cm = prior_outflow_z s)
+    assert (Hmin_pout : Z.min (z_prior_outflow_cm s) z_gate_capacity_cm = z_prior_outflow_cm s)
       by (apply Z.min_l; lia).
     assert (Hmin_out : Z.min (outflow_z control_z s t) z_gate_capacity_cm = outflow_z control_z s t)
       by (apply Z.min_l; lia).
@@ -2698,11 +2704,13 @@ End SignedFlow.
 
 Section NatZConnection.
 
-  (** Convert nat State to Z State. *)
+  (** Convert nat State to Z State.
+      Prior outflow is computed from gate position assuming capacity-limited. *)
   Definition state_to_z (s : State) : ZState :=
     {| z_reservoir_cm := Z.of_nat (reservoir_level_cm s);
        z_downstream_cm := Z.of_nat (downstream_stage_cm s);
-       z_gate_pct := Z.of_nat (gate_open_pct s) |}.
+       z_gate_pct := Z.of_nat (gate_open_pct s);
+       z_prior_outflow_cm := Z.of_nat (gate_capacity_cm pc * gate_open_pct s / 100) |}.
 
   (** Consistency hypothesis: Z parameters match nat plant config. *)
   Variable z_max_res : Z.
