@@ -14,6 +14,22 @@
 (*                                                                            *)
 (******************************************************************************)
 
+(** TODO:
+     [x] Reduce Z model hypothesis count
+     [x] Validate backwater head_ratio_pct
+     [ ] Formalize forecast error relationship
+     [ ] Add actuator dynamics model
+     [ ] Derive stage model from hydraulic physics
+     [ ] Extend step_mg to track per-gate state
+     [ ] Add MPC variant
+     [ ] Add probabilistic uncertainty quantification
+     [ ] Prove controller optimality
+     [ ] Optimize vm_compute scalability
+     [ ] Extract to OCaml/Haskell
+     [ ] Build test harness for historical data
+     [ ] Create formal Hoover Dam instantiation
+*)
+
 From Coq Require Import Arith Lia List ZArith Program.
 Import ListNotations.
 
@@ -2234,39 +2250,47 @@ Section SignedFlow.
 
   Local Open Scope Z_scope.
 
-  (** Integer-valued reservoir crest (cm). *)
-  Variable z_max_reservoir_cm  : Z.
-  Hypothesis z_max_reservoir_pos : z_max_reservoir_cm > 0.
+  (** Integer-valued plant configuration with embedded positivity proofs. *)
+  Record ZPlantConfig := mkZPlantConfig {
+    z_max_reservoir_cm : Z;
+    z_max_downstream_cm : Z;
+    z_gate_capacity_cm : Z;
+    z_gate_slew_pct : Z;
+    z_max_stage_rise_cm : Z;
+    z_max_reservoir_pos : z_max_reservoir_cm > 0;
+    z_max_downstream_pos : z_max_downstream_cm > 0;
+    z_gate_capacity_pos : z_gate_capacity_cm > 0;
+    z_gate_slew_nonneg : z_gate_slew_pct >= 0;
+    z_max_stage_rise_nonneg : z_max_stage_rise_cm >= 0
+  }.
 
-  (** Integer-valued downstream stage ceiling (cm). *)
-  Variable z_max_downstream_cm : Z.
-  Hypothesis z_max_downstream_pos : z_max_downstream_cm > 0.
+  Variable zpc : ZPlantConfig.
 
-  (** Integer-valued capacity at 100% gate (cms). *)
-  Variable z_gate_capacity_cm : Z.
-  Hypothesis z_gate_capacity_pos : z_gate_capacity_cm > 0.
+  (** Linear stage model: stage = base + gain * min(outflow, capacity). *)
+  Record ZStageModel := mkZStageModel {
+    z_stage_gain : Z;
+    z_base_stage : Z;
+    z_stage_gain_nonneg : z_stage_gain >= 0;
+    z_base_stage_nonneg : z_base_stage >= 0;
+    z_stage_at_capacity_bounded : z_base_stage + z_stage_gain * z_gate_capacity_cm zpc <= z_max_downstream_cm zpc
+  }.
 
-  (** Integer-valued gate slew (%). *)
-  Variable z_gate_slew_pct     : Z.
-  Hypothesis z_gate_slew_nonneg : z_gate_slew_pct >= 0.
-
-  (** Integer-valued per-step stage rise allowance (cm). *)
-  Variable z_max_stage_rise_cm : Z.
-  Hypothesis z_max_stage_rise_nonneg : z_max_stage_rise_cm >= 0.
+  Variable zsm : ZStageModel.
 
   (** Integer worst-case inflow per timestep. *)
   Variable worst_case_inflow_z : nat -> Z.
 
   (** Integer hydraulic response to outflow. *)
-  Variable stage_from_outflow_z : Z -> Z.
+  Definition stage_from_outflow_z (out : Z) : Z :=
+    z_base_stage zsm + z_stage_gain zsm * Z.min out (z_gate_capacity_cm zpc).
 
   (** Integer controller output. *)
   Variable control_z : ZState -> nat -> Z.
 
   (** Integer safety: reservoir and downstream within bounds. *)
   Definition safe_z (s:ZState) : Prop :=
-    0 <= z_reservoir_cm s /\ z_reservoir_cm s <= z_max_reservoir_cm /\
-    0 <= z_downstream_cm s /\ z_downstream_cm s <= z_max_downstream_cm.
+    0 <= z_reservoir_cm s /\ z_reservoir_cm s <= z_max_reservoir_cm zpc /\
+    0 <= z_downstream_cm s /\ z_downstream_cm s <= z_max_downstream_cm zpc.
 
   (** Integer gate command within [0,100]. *)
   Definition gate_ok_z (s:ZState) : Prop :=
@@ -2281,7 +2305,7 @@ Section SignedFlow.
 
   (** Integer outflow: min of capacity and availability. *)
   Definition outflow_z (ctrl:ZState -> nat -> Z) (s:ZState) (t:nat) : Z :=
-    Z.min (z_gate_capacity_cm * ctrl s t / 100) (available_water_z s t).
+    Z.min (z_gate_capacity_cm zpc * ctrl s t / 100) (available_water_z s t).
 
   (** Integer plant step.
       Updates prior_outflow to current outflow for next step's ramp calculation. *)
@@ -2309,7 +2333,7 @@ Section SignedFlow.
   (** Integer controller slew is within +/- z_gate_slew_pct per step. *)
   Hypothesis control_slew_limited_z :
     forall s t, gate_ok_z s ->
-      - z_gate_slew_pct <= control_z s t - z_gate_pct s <= z_gate_slew_pct.
+      - z_gate_slew_pct zpc <= control_z s t - z_gate_pct s <= z_gate_slew_pct zpc.
 
   (** Integer inflow is never negative. *)
   Hypothesis inflow_nonneg_z :
@@ -2317,61 +2341,78 @@ Section SignedFlow.
 
   (** Integer gate capacity covers worst-case inflow. *)
   Hypothesis capacity_sufficient_z :
-    forall s t, worst_case_inflow_z t <= z_gate_capacity_cm * control_z s t / 100.
+    forall s t, worst_case_inflow_z t <= z_gate_capacity_cm zpc * control_z s t / 100.
 
-  (** Integer stage response respects downstream ceiling. *)
-  Hypothesis stage_bounded_z :
-    forall out, stage_from_outflow_z out <= z_max_downstream_cm.
+  (** Stage response is nonnegative for nonnegative outflow. *)
+  Lemma stage_nonneg_z : forall out, 0 <= out -> 0 <= stage_from_outflow_z out.
+  Proof.
+    intros out Hout.
+    unfold stage_from_outflow_z.
+    pose proof (z_stage_gain_nonneg zsm).
+    pose proof (z_base_stage_nonneg zsm).
+    assert (Hmin : 0 <= Z.min out (z_gate_capacity_cm zpc)).
+    { apply Z.min_glb; [exact Hout | pose proof (z_gate_capacity_pos zpc); lia]. }
+    nia.
+  Qed.
 
-  (** Integer stage response is monotone in outflow. *)
-  Hypothesis stage_monotone_z :
-    forall o1 o2, o1 <= o2 -> stage_from_outflow_z o1 <= stage_from_outflow_z o2.
+  (** Stage response is monotone in outflow. *)
+  Lemma stage_monotone_z : forall o1 o2,
+    0 <= o1 -> o1 <= o2 -> stage_from_outflow_z o1 <= stage_from_outflow_z o2.
+  Proof.
+    intros o1 o2 Ho1 Ho12.
+    unfold stage_from_outflow_z.
+    pose proof (z_stage_gain_nonneg zsm).
+    assert (Hmin : Z.min o1 (z_gate_capacity_cm zpc) <= Z.min o2 (z_gate_capacity_cm zpc)).
+    { apply Z.min_le_compat_r. lia. }
+    nia.
+  Qed.
 
-  (** Integer stage response is nonnegative. *)
-  Hypothesis stage_nonneg_z :
-    forall out, 0 <= stage_from_outflow_z out.
-
-  (** Stage gain: how much stage rises per unit outflow. *)
-  Variable z_stage_gain : Z.
-  Hypothesis z_stage_gain_nonneg : z_stage_gain >= 0.
-
-  (** Base stage when outflow is zero. *)
-  Variable z_base_stage : Z.
-  Hypothesis z_base_stage_nonneg : z_base_stage >= 0.
-
-  (** Stage model: linear response with saturation at capacity. *)
-  Hypothesis stage_model_z :
-    forall out, 0 <= out ->
-      stage_from_outflow_z out = z_base_stage + z_stage_gain * Z.min out z_gate_capacity_cm.
+  (** Stage response respects downstream ceiling. *)
+  Lemma stage_bounded_z : forall out, 0 <= out -> stage_from_outflow_z out <= z_max_downstream_cm zpc.
+  Proof.
+    intros out Hout.
+    unfold stage_from_outflow_z.
+    pose proof (z_stage_gain_nonneg zsm).
+    pose proof (z_stage_at_capacity_bounded zsm).
+    assert (Hmin : Z.min out (z_gate_capacity_cm zpc) <= z_gate_capacity_cm zpc).
+    { apply Z.le_min_r. }
+    nia.
+  Qed.
 
   (** Maximum outflow change per step (bounded by gate slew and capacity). *)
   Definition max_outflow_change_z : Z :=
-    z_gate_capacity_cm * z_gate_slew_pct / 100.
+    z_gate_capacity_cm zpc * z_gate_slew_pct zpc / 100.
 
   (** Stage rise allowance covers maximum stage change from outflow change.
-      Includes +1 to account for integer division rounding in outflow calculations. *)
+      The +1 accounts for integer division rounding in outflow calculations. *)
   Hypothesis stage_rise_covers_change :
-    z_stage_gain * (max_outflow_change_z + 1) <= z_max_stage_rise_cm.
-
-  (** Prior outflow bounds: must be nonnegative and at most capacity.
-      This is an invariant that step_z maintains. *)
-  Hypothesis prior_outflow_bounds :
-    forall s, valid_z s -> 0 <= z_prior_outflow_cm s <= z_gate_capacity_cm.
+    z_stage_gain zsm * (max_outflow_change_z + 1) <= z_max_stage_rise_cm zpc.
 
   (** Current stage matches stage model applied to prior outflow.
-      This is an invariant: step_z sets downstream = stage_from_outflow(out)
-      and prior_outflow = out, so this holds after any step. *)
+      Invariant: step_z sets downstream = stage_from_outflow(out) and prior_outflow = out. *)
   Hypothesis stage_from_prior :
     forall s, safe_z s ->
       z_downstream_cm s = stage_from_outflow_z (z_prior_outflow_cm s).
 
-  (** Prior outflow was capacity-limited (not availability-limited).
-      Under availability_sufficient, this holds after every step since
-      outflow = min(capacity*gate/100, avail) = capacity*gate/100.
-      Initial state must be set up to satisfy this. *)
+  (** Prior outflow equals capacity * gate / 100 (capacity-limited, not availability-limited). *)
   Hypothesis prior_outflow_capacity_limited :
     forall s, valid_z s ->
-      z_prior_outflow_cm s = z_gate_capacity_cm * z_gate_pct s / 100.
+      z_prior_outflow_cm s = z_gate_capacity_cm zpc * z_gate_pct s / 100.
+
+  (** Derived: Prior outflow is nonnegative and at most capacity. *)
+  Lemma prior_outflow_bounds :
+    forall s, valid_z s -> 0 <= z_prior_outflow_cm s <= z_gate_capacity_cm zpc.
+  Proof.
+    intros s Hvalid.
+    rewrite (prior_outflow_capacity_limited Hvalid).
+    destruct Hvalid as [_ [Hgate_lo Hgate_hi]].
+    pose proof (z_gate_capacity_pos zpc) as Hcap_pos.
+    split.
+    - apply Z.div_pos; nia.
+    - apply Z.div_le_upper_bound; [lia|].
+      assert (z_gate_pct s <= 100) by lia.
+      nia.
+  Qed.
 
   (** Micro-lemma: Division remainder is bounded. *)
   Lemma div_mod_eq : forall a b, b > 0 -> a = b * (a / b) + a mod b.
@@ -2470,15 +2511,12 @@ Section SignedFlow.
     lia.
   Qed.
 
-  (** Reservoir always has enough water to discharge at commanded rate.
-      This is a design constraint: the reservoir must be sized to handle flows. *)
+  (** Reservoir always has enough water to discharge at commanded rate. *)
   Hypothesis availability_sufficient :
     forall s t, safe_z s -> gate_ok_z s ->
-      available_water_z s t >= z_gate_capacity_cm * control_z s t / 100.
+      available_water_z s t >= z_gate_capacity_cm zpc * control_z s t / 100.
 
-  (** Derived: Outflow change is bounded by gate slew plus rounding.
-      Uses prior_outflow_capacity_limited, control_slew_limited_z, and availability_sufficient.
-      The +1 accounts for integer division rounding in capacity calculations. *)
+  (** Outflow change is bounded by gate slew plus rounding. *)
   Lemma outflow_change_bounded :
     forall s t, safe_z s -> gate_ok_z s ->
       Z.abs (outflow_z control_z s t - z_prior_outflow_cm s) <= max_outflow_change_z + 1.
@@ -2487,40 +2525,43 @@ Section SignedFlow.
     assert (Hvalid : valid_z s0) by (split; assumption).
     unfold outflow_z, max_outflow_change_z.
     rewrite (prior_outflow_capacity_limited Hvalid).
-    set (new_cap := z_gate_capacity_cm * control_z s0 t0 / 100).
-    set (old_cap := z_gate_capacity_cm * z_gate_pct s0 / 100).
+    set (cap := z_gate_capacity_cm zpc).
+    set (slew := z_gate_slew_pct zpc).
+    set (new_cap := cap * control_z s0 t0 / 100).
+    set (old_cap := cap * z_gate_pct s0 / 100).
     set (avail := available_water_z s0 t0).
-    assert (Hslew : - z_gate_slew_pct <= control_z s0 t0 - z_gate_pct s0 <= z_gate_slew_pct)
+    pose proof (z_gate_capacity_pos zpc) as Hcap_pos.
+    pose proof (z_gate_slew_nonneg zpc) as Hslew_nonneg.
+    assert (Hslew : - slew <= control_z s0 t0 - z_gate_pct s0 <= slew)
       by (apply control_slew_limited_z; exact Hgate).
     assert (Hctrl_bounds : 0 <= control_z s0 t0 <= 100) by apply control_within_bounds_z.
     unfold gate_ok_z in Hgate.
-    assert (Hnew_nonneg : 0 <= z_gate_capacity_cm * control_z s0 t0) by nia.
-    assert (Hold_nonneg : 0 <= z_gate_capacity_cm * z_gate_pct s0) by nia.
+    assert (Hnew_nonneg : 0 <= cap * control_z s0 t0) by nia.
+    assert (Hold_nonneg : 0 <= cap * z_gate_pct s0) by nia.
     assert (Hnew_cap_lo : 0 <= new_cap) by (unfold new_cap; apply Z.div_pos; lia).
     assert (Hold_cap_lo : 0 <= old_cap) by (unfold old_cap; apply Z.div_pos; lia).
-    assert (Hdiff_ctrl : Z.abs (control_z s0 t0 - z_gate_pct s0) <= z_gate_slew_pct).
+    assert (Hdiff_ctrl : Z.abs (control_z s0 t0 - z_gate_pct s0) <= slew).
     { apply Z.abs_le. lia. }
-    assert (Hprod_bound : Z.abs (z_gate_capacity_cm * control_z s0 t0 - z_gate_capacity_cm * z_gate_pct s0)
-                          <= z_gate_capacity_cm * z_gate_slew_pct).
-    { replace (z_gate_capacity_cm * control_z s0 t0 - z_gate_capacity_cm * z_gate_pct s0)
-        with (z_gate_capacity_cm * (control_z s0 t0 - z_gate_pct s0)) by ring.
+    assert (Hprod_bound : Z.abs (cap * control_z s0 t0 - cap * z_gate_pct s0) <= cap * slew).
+    { replace (cap * control_z s0 t0 - cap * z_gate_pct s0)
+        with (cap * (control_z s0 t0 - z_gate_pct s0)) by ring.
       apply abs_mul_bound; lia. }
-    assert (Habs_div_bound : Z.abs (new_cap - old_cap) <= z_gate_capacity_cm * z_gate_slew_pct / 100 + 1).
+    assert (Habs_div_bound : Z.abs (new_cap - old_cap) <= cap * slew / 100 + 1).
     { unfold new_cap, old_cap.
       eapply Z.le_trans.
       - apply abs_div_diff_bound; lia.
       - apply Z.add_le_mono_r.
         apply div_mono; [lia | exact Hprod_bound]. }
     assert (Havail_ge : avail >= new_cap).
-    { unfold avail, new_cap. apply availability_sufficient; assumption. }
+    { unfold avail, new_cap, cap. apply availability_sufficient; assumption. }
     rewrite Z.min_l by lia.
     exact Habs_div_bound.
   Qed.
 
-  (** Derived: Integer stage ramp limit holds for one step. *)
+  (** Stage ramp limit holds for one step. *)
   Lemma stage_ramp_preserved_z :
     forall s t, safe_z s -> gate_ok_z s ->
-      stage_from_outflow_z (outflow_z control_z s t) <= z_downstream_cm s + z_max_stage_rise_cm.
+      stage_from_outflow_z (outflow_z control_z s t) <= z_downstream_cm s + z_max_stage_rise_cm zpc.
   Proof.
     intros s t Hsafe Hgate.
     assert (Hvalid : valid_z s) by (split; assumption).
@@ -2528,8 +2569,13 @@ Section SignedFlow.
     pose proof (@outflow_change_bounded s t Hsafe Hgate) as Hchange.
     pose proof (prior_outflow_bounds Hvalid) as Hpbounds.
     destruct Hpbounds as [Hprior_lo Hprior_hi].
+    set (cap := z_gate_capacity_cm zpc).
+    set (gain := z_stage_gain zsm).
+    set (base := z_base_stage zsm).
     set (out := outflow_z control_z s t).
     set (pout := z_prior_outflow_cm s).
+    pose proof (z_gate_capacity_pos zpc) as Hcap_pos.
+    pose proof (z_stage_gain_nonneg zsm) as Hgain_nonneg.
     assert (Hout_lo : 0 <= out).
     { unfold out, outflow_z.
       apply Z.min_glb_iff. split.
@@ -2539,35 +2585,31 @@ Section SignedFlow.
       - unfold available_water_z.
         destruct Hsafe as [Hres0' _].
         pose proof (inflow_nonneg_z t). lia. }
-    assert (Hout_hi : out <= z_gate_capacity_cm).
-    { unfold out, outflow_z.
+    assert (Hout_hi : out <= cap).
+    { unfold out, outflow_z, cap.
       eapply Z.le_trans.
       - apply Z.le_min_l.
-      - apply Z.le_trans with (m := z_gate_capacity_cm * 100 / 100).
+      - apply Z.le_trans with (m := z_gate_capacity_cm zpc * 100 / 100).
         + apply Z.div_le_mono; [lia|].
           apply Z.mul_le_mono_nonneg_l; [lia|].
           destruct (control_within_bounds_z s t). lia.
         + rewrite Z.div_mul; lia. }
     rewrite Hprior.
-    unfold out, pout.
-    assert (Hstage_pout : stage_from_outflow_z (z_prior_outflow_cm s) =
-                          z_base_stage + z_stage_gain * Z.min (z_prior_outflow_cm s) z_gate_capacity_cm)
-      by (apply stage_model_z; exact Hprior_lo).
-    assert (Hstage_out : stage_from_outflow_z (outflow_z control_z s t) =
-                         z_base_stage + z_stage_gain * Z.min (outflow_z control_z s t) z_gate_capacity_cm)
-      by (apply stage_model_z; exact Hout_lo).
-    rewrite Hstage_pout, Hstage_out.
-    assert (Hmin_pout : Z.min (z_prior_outflow_cm s) z_gate_capacity_cm = z_prior_outflow_cm s)
+    unfold out, pout, cap, gain, base.
+    unfold stage_from_outflow_z.
+    assert (Hmin_pout : Z.min (z_prior_outflow_cm s) (z_gate_capacity_cm zpc) = z_prior_outflow_cm s)
       by (apply Z.min_l; lia).
-    assert (Hmin_out : Z.min (outflow_z control_z s t) z_gate_capacity_cm = outflow_z control_z s t)
+    assert (Hmin_out : Z.min (outflow_z control_z s t) (z_gate_capacity_cm zpc) = outflow_z control_z s t)
       by (apply Z.min_l; lia).
     rewrite Hmin_pout, Hmin_out.
-    assert (Hdiff : z_stage_gain * out - z_stage_gain * pout <= z_max_stage_rise_cm).
+    set (out' := outflow_z control_z s t).
+    set (pout' := z_prior_outflow_cm s).
+    assert (Hdiff : z_stage_gain zsm * out' - z_stage_gain zsm * pout' <= z_max_stage_rise_cm zpc).
     { rewrite <- Z.mul_sub_distr_l.
-      apply Z.le_trans with (m := z_stage_gain * Z.abs (out - pout)).
+      apply Z.le_trans with (m := z_stage_gain zsm * Z.abs (out' - pout')).
       - apply Z.mul_le_mono_nonneg_l; [lia|].
-        destruct (Z.abs_spec (out - pout)) as [[_ Heq]|[_ Heq]]; lia.
-      - apply Z.le_trans with (m := z_stage_gain * (max_outflow_change_z + 1)).
+        destruct (Z.abs_spec (out' - pout')) as [[_ Heq]|[_ Heq]]; lia.
+      - apply Z.le_trans with (m := z_stage_gain zsm * (max_outflow_change_z + 1)).
         + apply Z.mul_le_mono_nonneg_l; [lia|exact Hchange].
         + exact stage_rise_covers_change. }
     lia.
@@ -2590,27 +2632,33 @@ Section SignedFlow.
     intros s t Hsafe. unfold safe_z in *. destruct Hsafe as [Hres0 [Hres_max [Hstage0 Hstage_max]]].
     unfold step_z. simpl.
     set (inflow := worst_case_inflow_z t).
-    set (outcap := z_gate_capacity_cm * control_z s t / 100).
+    set (cap := z_gate_capacity_cm zpc).
+    set (outcap := cap * control_z s t / 100).
     set (aw := available_water_z s t).
+    pose proof (z_gate_capacity_pos zpc) as Hcap_pos.
     destruct (Z.leb_spec outcap aw) as [Hle_cap|Hgt_cap].
-    - (* capacity branch is limiting *)
-      assert (Hout_eq : outflow_z control_z s t = outcap).
-      { unfold outflow_z, outcap, aw. destruct (Z.leb_spec outcap aw); lia. }
-      rewrite Hout_eq. unfold inflow, aw in *.
-      assert (Hinflow_le_out : inflow <= outcap) by (subst outcap; apply capacity_sufficient_z).
+    - assert (Hout_eq : outflow_z control_z s t = outcap).
+      { unfold outflow_z, outcap, cap. apply Z.min_l. exact Hle_cap. }
+      rewrite Hout_eq. unfold inflow, aw, cap in *.
+      assert (Hinflow_le_out : inflow <= outcap) by (subst outcap cap; apply capacity_sufficient_z).
       assert (Hres_nonneg : 0 <= z_reservoir_cm s) by exact Hres0.
       assert (Hout_le_avail : outcap <= z_reservoir_cm s + inflow) by (subst aw; unfold available_water_z in Hle_cap; exact Hle_cap).
       split; [apply Z.le_0_sub; exact Hout_le_avail|].
       split.
       { apply Z.le_sub_le_add_r. lia. }
-      split; [apply stage_nonneg_z|apply stage_bounded_z].
-    - (* availability branch is limiting *)
-      assert (Hout_eq : outflow_z control_z s t = aw).
-      { unfold outflow_z, outcap, aw. destruct (Z.leb_spec outcap aw); lia. }
+      assert (Houtcap_nonneg : 0 <= outcap).
+      { unfold outcap, cap. apply Z.div_pos; [|lia].
+        apply Z.mul_nonneg_nonneg; [lia|].
+        destruct (control_within_bounds_z s t). lia. }
+      split; [apply stage_nonneg_z; exact Houtcap_nonneg|apply stage_bounded_z; exact Houtcap_nonneg].
+    - assert (Hout_eq : outflow_z control_z s t = aw).
+      { unfold outflow_z, outcap, cap. apply Z.min_r. apply Z.lt_le_incl. exact Hgt_cap. }
       rewrite Hout_eq. unfold aw, available_water_z, inflow in *.
+      assert (Haw_nonneg : 0 <= z_reservoir_cm s + worst_case_inflow_z t).
+      { pose proof (inflow_nonneg_z t). lia. }
       split; [lia|].
       split; [lia|].
-      split; [apply stage_nonneg_z|apply stage_bounded_z].
+      split; [apply stage_nonneg_z; exact Haw_nonneg|apply stage_bounded_z; exact Haw_nonneg].
   Qed.
 
   (** Integer validity preserved by a single step. *)
@@ -2662,23 +2710,24 @@ Section SignedFlow.
   (** Integer downstream ramp preserved over a horizon. *)
   Lemma run_preserves_ramp_z : forall k s,
     valid_z s ->
-    z_downstream_cm (run_z control_z k s) <= z_downstream_cm s + Z.of_nat k * z_max_stage_rise_cm.
+    z_downstream_cm (run_z control_z k s) <= z_downstream_cm s + Z.of_nat k * z_max_stage_rise_cm zpc.
   Proof.
     induction k; intros s Hvalid; cbn [run_z].
     - lia.
     - destruct Hvalid as [Hsafe Hgate].
       set (s' := step_z control_z s k).
+      set (rise := z_max_stage_rise_cm zpc).
       assert (Hvalid' : valid_z s') by (apply step_preserves_valid_z; split; assumption).
-      assert (Hramp : z_downstream_cm s' <= z_downstream_cm s + z_max_stage_rise_cm)
+      assert (Hramp : z_downstream_cm s' <= z_downstream_cm s + rise)
         by (apply stage_ramp_preserved_z; assumption).
       specialize (IHk s' Hvalid').
       replace (Z.of_nat (S k)) with (Z.of_nat k + 1) by lia.
       rewrite Z.mul_add_distr_r.
       rewrite Z.mul_1_l.
-      replace (z_downstream_cm s + (Z.of_nat k * z_max_stage_rise_cm + z_max_stage_rise_cm))
-        with (z_downstream_cm s + z_max_stage_rise_cm + Z.of_nat k * z_max_stage_rise_cm) by lia.
+      replace (z_downstream_cm s + (Z.of_nat k * rise + rise))
+        with (z_downstream_cm s + rise + Z.of_nat k * rise) by lia.
       eapply Z.le_trans; [apply IHk|].
-      apply Z.add_le_mono_r with (p := Z.of_nat k * z_max_stage_rise_cm) in Hramp.
+      apply Z.add_le_mono_r with (p := Z.of_nat k * rise) in Hramp.
       exact Hramp.
   Qed.
 
@@ -3042,6 +3091,29 @@ Section BackwaterEffects.
 
   Definition head_ratio_pct : nat :=
     (effective_head * 100) / head_at_nominal.
+
+  (** Head ratio is at most 100% when effective head does not exceed nominal. *)
+  Lemma head_ratio_bounded :
+    effective_head <= head_at_nominal ->
+    head_ratio_pct <= 100.
+  Proof.
+    intro Hhead.
+    unfold head_ratio_pct.
+    apply Nat.Div0.div_le_upper_bound.
+    nia.
+  Qed.
+
+  (** Head ratio is zero when tailwater equals headwater (fully submerged). *)
+  Lemma head_ratio_zero_when_submerged :
+    effective_head = 0 ->
+    head_ratio_pct = 0.
+  Proof.
+    intro Hzero.
+    unfold head_ratio_pct.
+    rewrite Hzero.
+    simpl.
+    apply Nat.Div0.div_0_l.
+  Qed.
 
   Definition backwater_reduced_capacity : nat :=
     nominal_capacity * head_ratio_pct / 100.
