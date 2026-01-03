@@ -15,18 +15,16 @@
 (******************************************************************************)
 
 (** ROADMAP:
-     [x] 1.  Model multiple sensors with disagreement, prove fusion margin
-     [~] 2.  Add Byzantine sensor model, prove k-of-n voting safety
-     [ ] 3.  Define Lyapunov V(level), prove dV/dt < 0 outside target band
-     [ ] 4.  Prove MPC constraints from KKT or barrier structure
-     [ ] 5.  Add hybrid automaton, prove inter-sample bounds
-     [ ] 6.  Add event-triggered variant, prove minimum inter-event time
-     [ ] 7.  Add operator_override mode, prove manual commands safe
-     [ ] 8.  Define Modbus/DNP3 format, prove protocol invariants
-     [ ] 9.  Encode USGS gauge data for 1983/2011 floods, validate response
-     [ ] 10. Uncomment extraction, compile OCaml, test against vectors
-     [ ] 11. Extract to C, run WCET analyzer, prove deadline meets timestep
-     [ ] 12. Map Coq predicates to FERC Part 12D checklist
+     [~] 1.  Add Byzantine sensor model, prove k-of-n voting safety
+     [ ] 2.  Define Lyapunov V(level), prove dV/dt < 0 outside target band
+     [ ] 3.  Prove MPC constraints from KKT or barrier structure
+     [ ] 4.  Add hybrid automaton, prove inter-sample bounds
+     [ ] 5.  Add event-triggered variant, prove minimum inter-event time
+     [ ] 6.  Define Modbus/DNP3 format, prove protocol invariants
+     [ ] 7.  Encode USGS gauge data for 1983/2011 floods, validate response
+     [ ] 8.  Uncomment extraction, compile OCaml, test against vectors
+     [ ] 9.  Extract to C, run WCET analyzer, prove deadline meets timestep
+     [ ] 10. Map Coq predicates to FERC Part 12D checklist
 *)
 
 From Coq Require Import Arith Lia List ZArith Program.
@@ -3348,6 +3346,228 @@ Section MultiGate.
   Proof. intros; eapply run_mg_preserves_valid; eauto. Qed.
 
 End MultiGate.
+
+(** --------------------------------------------------------------------------- *)
+(** Operator Override Mode                                                        *)
+(**                                                                              *)
+(** Models manual operator intervention. The operator can override the automatic *)
+(** controller with a direct gate command. Safety holds when the manual command  *)
+(** is bounded and gate capacity exceeds worst-case inflow.                       *)
+(** --------------------------------------------------------------------------- *)
+
+Section OperatorOverride.
+
+  (** Automatic controller (baseline). *)
+  Variable control_auto : State -> nat -> nat.
+
+  (** Operator's manual command (None = use automatic). *)
+  Variable operator_cmd : nat -> option nat.
+
+  (** Override controller: use operator command if present, else automatic. *)
+  Definition control_override (s : State) (t : nat) : nat :=
+    match operator_cmd t with
+    | Some cmd => cmd
+    | None => control_auto s t
+    end.
+
+  (** Operator commands are always bounded. *)
+  Hypothesis operator_cmd_bounded :
+    forall t cmd, operator_cmd t = Some cmd -> cmd <= 100.
+
+  (** Automatic controller is bounded. *)
+  Hypothesis control_auto_bounded :
+    forall s t, control_auto s t <= 100.
+
+  (** Override controller inherits boundedness. *)
+  Lemma control_override_bounded :
+    forall s t, control_override s t <= 100.
+  Proof.
+    intros s t.
+    unfold control_override.
+    destruct (operator_cmd t) as [cmd|] eqn:Hcmd.
+    - eapply operator_cmd_bounded. exact Hcmd.
+    - apply control_auto_bounded.
+  Qed.
+
+  (** Hydraulic response function. *)
+  Variable stage_from_outflow_op : nat -> nat.
+
+  (** Stage is bounded. *)
+  Hypothesis stage_bounded_op :
+    forall out, stage_from_outflow_op out <= max_downstream_cm pc.
+
+  (** Maximum inflow. *)
+  Variable max_inflow_op : nat.
+
+  (** Worst-case inflow is bounded. *)
+  Hypothesis max_inflow_bounds_op :
+    forall t, worst_case_inflow t <= max_inflow_op.
+
+  (** Gate capacity exceeds max inflow. *)
+  Hypothesis capacity_exceeds_inflow_op :
+    max_inflow_op <= gate_capacity_cm pc.
+
+  (** Outflow with override controller. *)
+  Definition outflow_override (s : State) (t : nat) : nat :=
+    Nat.min (gate_capacity_cm pc * control_override s t / 100)
+            (available_water worst_case_inflow s t).
+
+  (** Step function with override controller. *)
+  Definition step_override (s : State) (t : nat) : State :=
+    let inflow := worst_case_inflow t in
+    let out := outflow_override s t in
+    let new_res := reservoir_level_cm s + inflow - out in
+    let new_stage := stage_from_outflow_op out in
+    {| reservoir_level_cm := new_res;
+       downstream_stage_cm := new_stage;
+       gate_open_pct := control_override s t |}.
+
+  (** Run with override controller. *)
+  Fixpoint run_override (h : nat) (s : State) : State :=
+    match h with
+    | O => s
+    | S k => run_override k (step_override s k)
+    end.
+
+  (** Minimum gate percentage to ensure capacity covers inflow. *)
+  Variable min_gate_override : nat.
+
+  (** Min gate is bounded. *)
+  Hypothesis min_gate_override_bounded : min_gate_override <= 100.
+
+  (** Min gate provides sufficient capacity. *)
+  Hypothesis min_gate_override_sufficient :
+    gate_capacity_cm pc * min_gate_override / 100 >= max_inflow_op.
+
+  (** Automatic controller respects minimum. *)
+  Hypothesis control_auto_ge_min :
+    forall s t, control_auto s t >= min_gate_override.
+
+  (** Operator commands respect minimum (critical safety constraint). *)
+  Hypothesis operator_cmd_ge_min :
+    forall t cmd, operator_cmd t = Some cmd -> cmd >= min_gate_override.
+
+  (** Override controller respects minimum. *)
+  Lemma control_override_ge_min :
+    forall s t, control_override s t >= min_gate_override.
+  Proof.
+    intros s t.
+    unfold control_override.
+    destruct (operator_cmd t) as [cmd|] eqn:Hcmd.
+    - eapply operator_cmd_ge_min. exact Hcmd.
+    - apply control_auto_ge_min.
+  Qed.
+
+  (** Capacity sufficient under override. *)
+  Lemma capacity_sufficient_override :
+    forall s t, worst_case_inflow t <= gate_capacity_cm pc * control_override s t / 100.
+  Proof.
+    intros s t.
+    pose proof (control_override_ge_min s t) as Hge.
+    pose proof (max_inflow_bounds_op t) as Hinflow.
+    assert (Hcap : gate_capacity_cm pc * control_override s t / 100 >=
+                   gate_capacity_cm pc * min_gate_override / 100).
+    { apply Nat.Div0.div_le_mono.
+      apply Nat.mul_le_mono_l.
+      exact Hge. }
+    lia.
+  Qed.
+
+  (** Reservoir balance: inflow is covered by outflow plus headroom. *)
+  Lemma reservoir_preserved_override :
+    forall s t,
+      reservoir_level_cm s <= max_reservoir_cm pc ->
+      reservoir_level_cm s + worst_case_inflow t
+        <= outflow_override s t + max_reservoir_cm pc.
+  Proof.
+    intros s t Hres.
+    pose proof (capacity_sufficient_override s t) as Hcap.
+    unfold outflow_override, available_water.
+    apply Nat.min_case_strong; intro Hcmp.
+    - (* capacity <= available: outflow = capacity >= inflow *)
+      lia.
+    - (* capacity > available: outflow = available, drains reservoir *)
+      lia.
+  Qed.
+
+  (** Downstream safety preserved by step. *)
+  Lemma step_override_downstream_safe :
+    forall s t, downstream_stage_cm (step_override s t) <= max_downstream_cm pc.
+  Proof.
+    intros s t.
+    unfold step_override. simpl.
+    apply stage_bounded_op.
+  Qed.
+
+  (** Reservoir safety preserved by step. *)
+  Lemma step_override_reservoir_safe :
+    forall s t,
+      reservoir_level_cm s <= max_reservoir_cm pc ->
+      reservoir_level_cm (step_override s t) <= max_reservoir_cm pc.
+  Proof.
+    intros s t Hres.
+    unfold step_override. simpl.
+    apply sub_le_from_bound.
+    apply reservoir_preserved_override.
+    exact Hres.
+  Qed.
+
+  (** Safety preserved by step. *)
+  Lemma step_override_preserves_safe :
+    forall s t, safe s -> safe (step_override s t).
+  Proof.
+    intros s t [Hres Hdown].
+    unfold safe. split.
+    - apply step_override_reservoir_safe. exact Hres.
+    - apply step_override_downstream_safe.
+  Qed.
+
+  (** Gate validity preserved by step. *)
+  Lemma step_override_preserves_gate_ok :
+    forall s t, gate_ok (step_override s t).
+  Proof.
+    intros s t.
+    unfold gate_ok, step_override. simpl.
+    apply control_override_bounded.
+  Qed.
+
+  (** Validity preserved by step. *)
+  Lemma step_override_preserves_valid :
+    forall s t, valid s -> valid (step_override s t).
+  Proof.
+    intros s t [Hsafe Hgate].
+    unfold valid. split.
+    - apply step_override_preserves_safe. exact Hsafe.
+    - apply step_override_preserves_gate_ok.
+  Qed.
+
+  (** Safety preserved across horizon. *)
+  Lemma run_override_preserves_safe :
+    forall h s, safe s -> safe (run_override h s).
+  Proof.
+    induction h; intros s Hsafe.
+    - exact Hsafe.
+    - simpl. apply IHh. apply step_override_preserves_safe. exact Hsafe.
+  Qed.
+
+  (** Validity preserved across horizon. *)
+  Lemma run_override_preserves_valid :
+    forall h s, valid s -> valid (run_override h s).
+  Proof.
+    induction h; intros s Hvalid.
+    - exact Hvalid.
+    - simpl. apply IHh. apply step_override_preserves_valid. exact Hvalid.
+  Qed.
+
+  Theorem schedule_safe_override :
+    forall s0 horizon, safe s0 -> safe (run_override horizon s0).
+  Proof. intros; apply run_override_preserves_safe; assumption. Qed.
+
+  Theorem schedule_valid_override :
+    forall s0 horizon, valid s0 -> valid (run_override horizon s0).
+  Proof. intros; apply run_override_preserves_valid; assumption. Qed.
+
+End OperatorOverride.
 
 (** --------------------------------------------------------------------------- *)
 (** Per-Gate State Tracking                                                       *)
