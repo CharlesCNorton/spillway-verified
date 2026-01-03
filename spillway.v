@@ -212,6 +212,50 @@ Section SCSCurveNumber.
     lia.
   Qed.
 
+  Lemma div_cross_le : forall a b c d,
+    c > 0 -> d > 0 -> a * d <= b * c -> a / c <= b / d.
+  Proof.
+    intros a b c d Hc Hd Hcross.
+    assert (Hd' : d <> 0) by lia.
+    assert (Hc' : c <> 0) by lia.
+    assert (Hdivmul : c * (a / c) <= a) by apply Nat.Div0.mul_div_le.
+    assert (H1 : a / c * d * c <= a * d).
+    { replace (a / c * d * c) with (c * (a / c) * d) by ring.
+      apply Nat.mul_le_mono_r. exact Hdivmul. }
+    assert (H2 : a / c * d <= a * d / c).
+    { apply Nat.div_le_lower_bound; [exact Hc'|].
+      rewrite Nat.mul_comm. exact H1. }
+    assert (H3 : a * d / c <= b).
+    { apply Nat.Div0.div_le_upper_bound.
+      rewrite (Nat.mul_comm c b). exact Hcross. }
+    assert (H4 : a / c * d <= b) by lia.
+    apply Nat.div_le_lower_bound; [exact Hd'|].
+    rewrite Nat.mul_comm. exact H4.
+  Qed.
+
+  Lemma scs_excess_monotone : forall cn P1 P2,
+    P1 <= P2 -> scs_excess cn P1 <= scs_excess cn P2.
+  Proof.
+    intros cn P1 P2 Hle.
+    unfold scs_excess.
+    set (Ia := scs_Ia cn). set (S := scs_S cn).
+    destruct (Nat.leb P1 Ia) eqn:H1; destruct (Nat.leb P2 Ia) eqn:H2.
+    - lia.
+    - lia.
+    - apply Nat.leb_gt in H1. apply Nat.leb_le in H2. lia.
+    - apply Nat.leb_gt in H1. apply Nat.leb_gt in H2.
+      set (x1 := P1 - Ia). set (x2 := P2 - Ia).
+      assert (Hx : x1 <= x2) by (unfold x1, x2; lia).
+      apply div_cross_le; [lia | lia |].
+      assert (H1' : x1 * x1 * x2 <= x2 * x2 * x1).
+      { replace (x2 * x2 * x1) with (x1 * x2 * x2) by ring.
+        apply Nat.mul_le_mono_r.
+        apply Nat.mul_le_mono_l. exact Hx. }
+      assert (H2' : x1 * x1 * S <= x2 * x2 * S).
+      { apply Nat.mul_le_mono_r. apply Nat.mul_le_mono; exact Hx. }
+      lia.
+  Qed.
+
 End SCSCurveNumber.
 
 (** --------------------------------------------------------------------------- *)
@@ -392,6 +436,115 @@ Section SCSDesignStorms.
 End SCSDesignStorms.
 
 (** --------------------------------------------------------------------------- *)
+(** Cumsum/Diff Telescope Lemmas                                                 *)
+(** --------------------------------------------------------------------------- *)
+
+(** Last element of cumsum_aux equals acc + list_sum. *)
+Lemma last_cumsum_aux : forall xs acc d,
+  xs <> nil ->
+  last (cumsum_aux acc xs) d = acc + list_sum xs.
+Proof.
+  induction xs as [|x xs' IH]; intros acc d Hne.
+  - exfalso; apply Hne; reflexivity.
+  - simpl. destruct xs' as [|y ys].
+    + simpl. lia.
+    + rewrite IH by discriminate.
+      simpl. lia.
+Qed.
+
+(** Last element of cumsum equals list_sum. *)
+Lemma last_cumsum : forall xs d,
+  xs <> nil ->
+  last (cumsum xs) d = list_sum xs.
+Proof.
+  intros xs d Hne.
+  unfold cumsum.
+  rewrite last_cumsum_aux by exact Hne.
+  lia.
+Qed.
+
+(** Generalized telescope for monotone lists. *)
+Lemma diff_sum_gen : forall xs a,
+  (forall i, S i < length (a :: xs) -> nth i (a :: xs) 0 <= nth (S i) (a :: xs) 0) ->
+  list_sum (diff (a :: xs)) + a = last (a :: xs) 0.
+Proof.
+  induction xs as [|x xs' IH]; intros a Hmono.
+  - simpl. lia.
+  - simpl. destruct xs' as [|y ys].
+    + simpl.
+      assert (Hax : a <= x) by (apply (Hmono 0); simpl; lia).
+      lia.
+    + assert (Hax : a <= x) by (apply (Hmono 0); simpl; lia).
+      assert (IHres : list_sum (diff (x :: y :: ys)) + x = last (x :: y :: ys) 0).
+      { apply IH. intros i Hi. apply (Hmono (S i)). simpl. simpl in Hi. lia. }
+      simpl. simpl in IHres. lia.
+Qed.
+
+(** Sum of diff (0 :: xs) telescopes to last xs 0 for monotone lists. *)
+Lemma diff_cons_sum : forall xs,
+  (forall i, S i < length xs -> nth i xs 0 <= nth (S i) xs 0) ->
+  list_sum (diff (0 :: xs)) = last xs 0.
+Proof.
+  intros xs Hmono.
+  destruct xs as [|x xs'].
+  - simpl. reflexivity.
+  - assert (H : list_sum (diff (0 :: x :: xs')) + 0 = last (0 :: x :: xs') 0).
+    { apply diff_sum_gen.
+      intros i Hi. destruct i.
+      - simpl. lia.
+      - simpl. apply Hmono.
+        simpl in Hi. apply Nat.succ_lt_mono in Hi. exact Hi. }
+    replace (list_sum (diff (0 :: x :: xs')) + 0) with
+            (list_sum (diff (0 :: x :: xs'))) in H by lia.
+    destruct xs' as [|y ys].
+    + simpl in H. simpl. exact H.
+    + simpl in H. simpl. exact H.
+Qed.
+
+(** Last of map f xs equals f (last xs d) for non-empty lists. *)
+Lemma last_map : forall A B (f : A -> B) xs d fd,
+  xs <> nil ->
+  fd = f d ->
+  last (map f xs) fd = f (last xs d).
+Proof.
+  intros A B f. induction xs as [|x xs' IH]; intros d fd Hne Hfd.
+  - exfalso; apply Hne; reflexivity.
+  - simpl. destruct xs' as [|y ys].
+    + simpl. reflexivity.
+    + apply IH; [discriminate | exact Hfd].
+Qed.
+
+Lemma cumsum_aux_monotone : forall xs acc i,
+  S i < length (cumsum_aux acc xs) ->
+  nth i (cumsum_aux acc xs) 0 <= nth (S i) (cumsum_aux acc xs) 0.
+Proof.
+  induction xs as [|x xs' IH]; intros acc i Hi.
+  - simpl in Hi. lia.
+  - simpl in Hi. simpl. destruct i.
+    + destruct xs' as [|y ys]; simpl in Hi; [lia|]. simpl. lia.
+    + destruct xs' as [|y ys]; simpl in Hi; [lia|]. simpl. apply IH. simpl. lia.
+Qed.
+
+Lemma cumsum_monotone : forall xs i,
+  S i < length (cumsum xs) ->
+  nth i (cumsum xs) 0 <= nth (S i) (cumsum xs) 0.
+Proof. intros. unfold cumsum. apply cumsum_aux_monotone. exact H. Qed.
+
+Lemma map_monotone : forall (f : nat -> nat) xs,
+  (forall a b, a <= b -> f a <= f b) ->
+  (forall i, S i < length xs -> nth i xs 0 <= nth (S i) xs 0) ->
+  (forall i, S i < length (map f xs) -> nth i (map f xs) 0 <= nth (S i) (map f xs) 0).
+Proof.
+  induction xs as [|x xs' IH]; intros Hfmono Hxsmono i Hi.
+  - simpl in Hi. lia.
+  - simpl in Hi. destruct i.
+    + simpl. destruct xs' as [|y ys]; [simpl in Hi; lia|].
+      simpl. apply Hfmono. apply (Hxsmono 0). simpl. lia.
+    + simpl. apply IH; [exact Hfmono | | simpl; lia].
+      intros j Hj. apply (Hxsmono (S j)). simpl. lia.
+Qed.
+
+(** --------------------------------------------------------------------------- *)
 (** Rainfall Excess Computation: Bridging storms and infiltration               *)
 (** --------------------------------------------------------------------------- *)
 
@@ -403,16 +556,22 @@ Section RainfallExcess.
     let cum_excess := map (scs_excess cn) cum_rainfall in
     diff (0 :: cum_excess).
 
-  (** Total excess equals final cumulative excess. *)
   Lemma rainfall_excess_total : forall cn rainfall,
     list_sum (rainfall_excess_scs cn rainfall) =
     scs_excess cn (list_sum rainfall).
   Proof.
     intros cn rainfall.
     unfold rainfall_excess_scs.
-    (* This requires careful reasoning about cumsum/diff inverses *)
-    (* Proof omitted for now - would need cumsum_last lemma *)
-  Admitted.
+    destruct rainfall as [|r rs].
+    - simpl. reflexivity.
+    - rewrite diff_cons_sum.
+      + rewrite last_map with (d := 0) by (discriminate || reflexivity).
+        rewrite last_cumsum by discriminate. reflexivity.
+      + apply map_monotone.
+        * apply scs_excess_monotone.
+        * intros i Hi. rewrite cumsum_length in Hi.
+          apply cumsum_monotone. rewrite cumsum_length. exact Hi.
+  Qed.
 
   (** Total excess never exceeds total rainfall. *)
   Lemma rainfall_excess_bounded : forall cn rainfall,
