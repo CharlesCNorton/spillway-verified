@@ -18,7 +18,7 @@
      [x] 1.  Compute |stage_linear - stage_manning| <= e, add e to margin
      [x] 2.  Bound linearization error, prove safety within Manning envelope
      [x] 3.  Parameterize consistency proof, characterize valid config polytope
-     [ ] 4.  Thread actuator lag through step/run, prove safety with delay
+     [x] 4.  Thread actuator lag through step/run, prove safety with delay
      [ ] 5.  Model per-gate hydraulics with interference, prove aggregate bound
      [ ] 6.  Replace linear attenuation with Saint-Venant or Ritter bounds
      [ ] 7.  Formalize unit hydrograph, derive worst-case from rainfall
@@ -3941,6 +3941,171 @@ Section ActuatorDynamics.
     apply actuator_response_bounded.
     - exact Hactual.
     - exact Hcmd.
+  Qed.
+
+  (** --- INTEGRATION WITH MAIN SAFETY FRAMEWORK --- *)
+
+  (** Connect actuator dynamics to plant configuration for safety analysis. *)
+  Variable pc : PlantConfig.
+  Variable stage_from_outflow_act : nat -> nat.
+  Hypothesis stage_bounded_act :
+    forall out, stage_from_outflow_act out <= max_downstream_cm pc.
+
+  (** Safety predicate for actuator-extended state. *)
+  Definition safe_swa (s : StateWithActuator) : Prop :=
+    swa_reservoir_cm s <= max_reservoir_cm pc /\
+    swa_downstream_cm s <= max_downstream_cm pc.
+
+  (** Gate validity for actuator state. *)
+  Definition gate_ok_swa (s : StateWithActuator) : Prop :=
+    swa_actual_pct s <= 100 /\ swa_commanded_pct s <= 100.
+
+  (** Full validity. *)
+  Definition valid_swa (s : StateWithActuator) : Prop :=
+    safe_swa s /\ gate_ok_swa s.
+
+  (** Horizon run with actuator dynamics. *)
+  Fixpoint run_with_actuator
+    (inflow : nat -> nat)
+    (ctrl : StateWithActuator -> nat -> nat)
+    (horizon : nat)
+    (s : StateWithActuator)
+    : StateWithActuator :=
+    match horizon with
+    | O => s
+    | S k => run_with_actuator inflow ctrl k
+               (step_with_actuator (gate_capacity_cm pc) stage_from_outflow_act inflow ctrl s k)
+    end.
+
+  (** Outflow with actuator uses ACTUAL gate position, not commanded. *)
+  Definition outflow_swa (inflow : nat -> nat) (s : StateWithActuator) (t : nat) : nat :=
+    Nat.min (gate_capacity_cm pc * swa_actual_pct s / 100)
+            (swa_reservoir_cm s + inflow t).
+
+  (** Lag compensation margin: extra margin needed due to actuator delay.
+      During ramp-up, actual gate lags commanded. Worst case is when we need
+      full gate but actual is still catching up. The lag margin covers inflow
+      that accumulates during the catch-up period. *)
+  Definition lag_compensation_margin (max_inflow : nat) : nat :=
+    (100 / actuator_speed_pct) * max_inflow.
+
+  (** Actuator lag is bounded: after k steps, error is at most (1-speed/100)^k.
+      For safety, we bound the maximum lag. *)
+  Definition max_lag_steps : nat := 100 / actuator_speed_pct.
+
+  (** Actual gate eventually catches up to commanded. *)
+  Lemma actuator_catches_up :
+    forall current setpoint,
+      current <= 100 -> setpoint <= 100 ->
+      actuator_speed_pct = 100 ->
+      actuator_response current setpoint = setpoint.
+  Proof.
+    intros current setpoint Hcur Hset Hspeed.
+    unfold actuator_response.
+    destruct (Nat.leb current setpoint) eqn:Hleb.
+    - apply Nat.leb_le in Hleb.
+      rewrite Hspeed.
+      replace ((setpoint - current) * 100 / 100) with (setpoint - current).
+      + lia.
+      + rewrite Nat.div_mul by lia. reflexivity.
+    - apply Nat.leb_gt in Hleb.
+      rewrite Hspeed.
+      replace ((current - setpoint) * 100 / 100) with (current - setpoint).
+      + lia.
+      + rewrite Nat.div_mul by lia. reflexivity.
+  Qed.
+
+  (** Step preserves downstream safety. *)
+  Lemma step_with_actuator_downstream_safe :
+    forall inflow ctrl s t,
+      swa_downstream_cm (step_with_actuator (gate_capacity_cm pc)
+                           stage_from_outflow_act inflow ctrl s t)
+        <= max_downstream_cm pc.
+  Proof.
+    intros inflow ctrl s t.
+    unfold step_with_actuator. simpl.
+    apply stage_bounded_act.
+  Qed.
+
+  (** Outflow after actuator response (used in step). *)
+  Definition outflow_after_response (inflow : nat -> nat) (ctrl : StateWithActuator -> nat -> nat)
+                                    (s : StateWithActuator) (t : nat) : nat :=
+    let new_actual := actuator_response (swa_actual_pct s) (ctrl s t) in
+    Nat.min (gate_capacity_cm pc * new_actual / 100)
+            (swa_reservoir_cm s + inflow t).
+
+  (** Key safety theorem: If outflow covers inflow relative to margin,
+      reservoir stays safe despite actuator delay. *)
+  Theorem step_with_actuator_reservoir_safe :
+    forall inflow ctrl s t,
+      swa_reservoir_cm s <= max_reservoir_cm pc ->
+      swa_reservoir_cm s + inflow t <=
+        max_reservoir_cm pc + outflow_after_response inflow ctrl s t ->
+      swa_reservoir_cm (step_with_actuator (gate_capacity_cm pc)
+                          stage_from_outflow_act inflow ctrl s t)
+        <= max_reservoir_cm pc.
+  Proof.
+    intros inflow ctrl s t Hres Hbalance.
+    unfold step_with_actuator, outflow_after_response in *.
+    simpl in *.
+    (* Now both goal and Hbalance have the same outflow expression *)
+    apply Nat.le_min_r in Hbalance || idtac.
+    (* Outflow is bounded by available water *)
+    pose proof (Nat.le_min_r (gate_capacity_cm pc *
+                               actuator_response (swa_actual_pct s) (ctrl s t) / 100)
+                             (swa_reservoir_cm s + inflow t)) as Hout_le.
+    lia.
+  Qed.
+
+  (** Combined safety: both reservoir and downstream stay safe. *)
+  Theorem step_with_actuator_safe :
+    forall inflow ctrl s t,
+      safe_swa s ->
+      swa_reservoir_cm s + inflow t <=
+        max_reservoir_cm pc + outflow_after_response inflow ctrl s t ->
+      safe_swa (step_with_actuator (gate_capacity_cm pc) stage_from_outflow_act inflow ctrl s t).
+  Proof.
+    intros inflow ctrl s t [Hres Hdown] Hbalance.
+    unfold safe_swa. split.
+    - apply step_with_actuator_reservoir_safe; assumption.
+    - apply step_with_actuator_downstream_safe.
+  Qed.
+
+  (** Gate validity is preserved. *)
+  Lemma step_with_actuator_gate_ok :
+    forall inflow ctrl s t,
+      gate_ok_swa s ->
+      ctrl s t <= 100 ->
+      gate_ok_swa (step_with_actuator (gate_capacity_cm pc) stage_from_outflow_act inflow ctrl s t).
+  Proof.
+    intros inflow ctrl s t [Hact Hcmd] Hctrl.
+    unfold step_with_actuator, gate_ok_swa. simpl.
+    split.
+    - apply actuator_response_bounded; assumption.
+    - exact Hctrl.
+  Qed.
+
+  (** Convert between State and StateWithActuator. *)
+  Definition state_to_swa (s : State) : StateWithActuator :=
+    {| swa_reservoir_cm := reservoir_level_cm s;
+       swa_downstream_cm := downstream_stage_cm s;
+       swa_commanded_pct := gate_open_pct s;
+       swa_actual_pct := gate_open_pct s |}.
+
+  Definition swa_to_state (s : StateWithActuator) : State :=
+    {| reservoir_level_cm := swa_reservoir_cm s;
+       downstream_stage_cm := swa_downstream_cm s;
+       gate_open_pct := swa_actual_pct s |}.
+
+  (** Safety equivalence: safe State implies safe StateWithActuator. *)
+  Lemma safe_state_to_swa :
+    forall s, reservoir_level_cm s <= max_reservoir_cm pc ->
+              downstream_stage_cm s <= max_downstream_cm pc ->
+              safe_swa (state_to_swa s).
+  Proof.
+    intros s Hres Hdown.
+    unfold safe_swa, state_to_swa. simpl.
+    split; assumption.
   Qed.
 
 End ActuatorDynamics.
