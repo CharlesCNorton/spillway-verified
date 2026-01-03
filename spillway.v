@@ -16,15 +16,14 @@
 
 (** ROADMAP:
      [~] 1.  Add Byzantine sensor model, prove k-of-n voting safety
-     [x] 2.  Define Lyapunov V(level), prove dV/dt < 0 outside target band
-     [ ] 3.  Prove MPC constraints from KKT or barrier structure
-     [ ] 4.  Add hybrid automaton, prove inter-sample bounds
-     [ ] 5.  Add event-triggered variant, prove minimum inter-event time
-     [ ] 6.  Define Modbus/DNP3 format, prove protocol invariants
-     [ ] 7.  Encode USGS gauge data for 1983/2011 floods, validate response
-     [ ] 8.  Uncomment extraction, compile OCaml, test against vectors
-     [ ] 9.  Extract to C, run WCET analyzer, prove deadline meets timestep
-     [ ] 10. Map Coq predicates to FERC Part 12D checklist
+     [ ] 2.  Prove MPC constraints from KKT or barrier structure
+     [ ] 3.  Add hybrid automaton, prove inter-sample bounds
+     [ ] 4.  Add event-triggered variant, prove minimum inter-event time
+     [ ] 5.  Define Modbus/DNP3 format, prove protocol invariants
+     [ ] 6.  Encode USGS gauge data for 1983/2011 floods, validate response
+     [ ] 7.  Uncomment extraction, compile OCaml, test against vectors
+     [ ] 8.  Extract to C, run WCET analyzer, prove deadline meets timestep
+     [ ] 9.  Map Coq predicates to FERC Part 12D checklist
 *)
 
 From Coq Require Import Arith Lia List ZArith Program.
