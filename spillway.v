@@ -4701,6 +4701,101 @@ Section SensorErrorModeling.
     exists ts. split; auto.
   Qed.
 
+  Lemma nth_default_le_fold_max :
+    forall n l d, n < length l -> nth_default n l d <= fold_right Nat.max 0 l.
+  Proof.
+    intros n l. revert n.
+    induction l as [|h t IH]; intros n d Hn.
+    - simpl in Hn. lia.
+    - simpl. destruct n.
+      + simpl. lia.
+      + simpl. simpl in Hn. specialize (IH n d). lia.
+  Qed.
+
+  Lemma insert_sorted_max :
+    forall x l, fold_right Nat.max 0 (insert_sorted x l) = Nat.max x (fold_right Nat.max 0 l).
+  Proof.
+    intros x l. induction l as [|h t IH].
+    - simpl. lia.
+    - simpl. destruct (Nat.leb x h) eqn:Hle.
+      + apply Nat.leb_le in Hle. simpl. lia.
+      + apply Nat.leb_gt in Hle. simpl. rewrite IH. lia.
+  Qed.
+
+  Lemma sort_preserves_max :
+    forall l, fold_right Nat.max 0 (sort_values l) = fold_right Nat.max 0 l.
+  Proof.
+    induction l as [|h t IH].
+    - reflexivity.
+    - simpl. rewrite insert_sorted_max. rewrite IH. reflexivity.
+  Qed.
+
+  Lemma honest_value_le_max :
+    forall arr ts,
+      In ts arr -> ts_status ts = Honest ->
+      sr_value (ts_reading ts) <= max_honest_value arr.
+  Proof.
+    intros arr ts Hin Hstat.
+    unfold max_honest_value, honest_values.
+    apply fold_max_le.
+    apply in_map_iff. exists ts. split; auto.
+    apply filter_In. split; auto. rewrite Hstat. reflexivity.
+  Qed.
+
+  Lemma In_nth_default :
+    forall (l : list nat) v, In v l -> exists n, n < length l /\ nth_default n l 0 = v.
+  Proof.
+    intros l v Hin.
+    induction l as [|h t IH].
+    - inversion Hin.
+    - destruct Hin as [Heq | Hin'].
+      + exists 0. simpl. split; [lia | auto].
+      + destruct (IH Hin') as [n [Hlt Hnth]].
+        exists (S n). simpl. split; [lia | exact Hnth].
+  Qed.
+
+  Lemma count_honest_positive_has_honest :
+    forall arr, count_honest arr > 0 ->
+      exists ts, In ts arr /\ ts_status ts = Honest.
+  Proof.
+    intros arr Hpos.
+    induction arr as [|h t IH].
+    - simpl in Hpos. lia.
+    - simpl in Hpos. destruct (ts_status h) eqn:Hstat.
+      + exists h. split; [left; auto | exact Hstat].
+      + destruct (IH Hpos) as [ts [Hin Hts]].
+        exists ts. split; [right; exact Hin | exact Hts].
+  Qed.
+
+  Lemma honest_value_in_extract :
+    forall arr ts, In ts arr -> ts_status ts = Honest ->
+      In (sr_value (ts_reading ts)) (extract_values arr).
+  Proof.
+    intros arr ts Hin Hstat.
+    unfold extract_values. apply in_map_iff.
+    exists ts. auto.
+  Qed.
+
+  Lemma honest_value_in_sorted :
+    forall arr ts, In ts arr -> ts_status ts = Honest ->
+      In (sr_value (ts_reading ts)) (sort_values (extract_values arr)).
+  Proof.
+    intros arr ts Hin Hstat.
+    rewrite In_sort. apply honest_value_in_extract; assumption.
+  Qed.
+
+  Lemma extract_length :
+    forall arr, length (extract_values arr) = length arr.
+  Proof.
+    intros arr. unfold extract_values. rewrite map_length. reflexivity.
+  Qed.
+
+  Lemma sorted_extract_length :
+    forall arr, length (sort_values (extract_values arr)) = length arr.
+  Proof.
+    intros arr. rewrite sort_length. apply extract_length.
+  Qed.
+
   Lemma median_le_max_honest :
     forall arr,
       count_honest arr > count_byzantine arr ->
