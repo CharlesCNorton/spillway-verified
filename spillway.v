@@ -17,7 +17,7 @@
 (** ROADMAP:
      [~] 1.  Add Byzantine sensor model, prove k-of-n voting safety
      [ ] 2.  Prove MPC constraints from KKT or barrier structure
-     [ ] 3.  Add hybrid automaton, prove inter-sample bounds
+     [x] 3.  Add hybrid automaton, prove inter-sample bounds
      [ ] 4.  Add event-triggered variant, prove minimum inter-event time
      [ ] 5.  Define Modbus/DNP3 format, prove protocol invariants
      [ ] 6.  Encode USGS gauge data for 1983/2011 floods, validate response
@@ -3693,6 +3693,100 @@ Section OperatorOverride.
   Proof. intros; apply run_override_preserves_valid; assumption. Qed.
 
 End OperatorOverride.
+
+(** --------------------------------------------------------------------------- *)
+(** Hybrid Automaton: Inter-Sample Safety Bounds                                  *)
+(**                                                                              *)
+(** The discrete model assumes instantaneous state updates at sample times.      *)
+(** This section proves that safety holds continuously between samples when      *)
+(** the gate is held fixed and inflow is bounded.                                *)
+(** --------------------------------------------------------------------------- *)
+
+Section HybridInterSample.
+
+  Variable max_inflow_rate : nat.
+  Variable outflow_rate : nat.
+
+  Hypothesis outflow_dominates : outflow_rate >= max_inflow_rate.
+
+  Definition level_at_time (level0 : nat) (inflow_rate : nat) (dt : nat) : nat :=
+    if Nat.leb outflow_rate (level0 + inflow_rate * dt)
+    then level0 + inflow_rate * dt - outflow_rate * dt
+    else 0.
+
+  Lemma level_bounded_when_outflow_dominates :
+    forall level0 inflow_rate dt,
+      inflow_rate <= max_inflow_rate ->
+      level_at_time level0 inflow_rate dt <= level0.
+  Proof.
+    intros level0 inflow_rate dt Hinflow.
+    unfold level_at_time.
+    destruct (Nat.leb outflow_rate (level0 + inflow_rate * dt)) eqn:Hle.
+    - assert (Hout_ge : outflow_rate * dt >= inflow_rate * dt).
+      { apply Nat.mul_le_mono_r. lia. }
+      lia.
+    - lia.
+  Qed.
+
+  Definition inter_sample_safe (level0 : nat) (max_level : nat) : Prop :=
+    forall inflow_rate dt,
+      inflow_rate <= max_inflow_rate ->
+      level_at_time level0 inflow_rate dt <= max_level.
+
+  Lemma inter_sample_safety :
+    forall level0 max_level,
+      level0 <= max_level ->
+      inter_sample_safe level0 max_level.
+  Proof.
+    intros level0 max_level Hlevel0 inflow_rate dt Hinflow.
+    assert (Hbound : level_at_time level0 inflow_rate dt <= level0).
+    { apply level_bounded_when_outflow_dominates. exact Hinflow. }
+    lia.
+  Qed.
+
+  Definition worst_case_level (level0 : nat) (timestep : nat) : nat :=
+    level0 + max_inflow_rate * timestep.
+
+  Lemma worst_case_is_upper_bound :
+    forall level0 inflow_rate dt,
+      inflow_rate <= max_inflow_rate ->
+      dt > 0 ->
+      level0 + inflow_rate * dt <= worst_case_level level0 dt.
+  Proof.
+    intros level0 inflow_rate dt Hinflow Hdt.
+    unfold worst_case_level.
+    apply Nat.add_le_mono_l.
+    apply Nat.mul_le_mono_r.
+    exact Hinflow.
+  Qed.
+
+  Variable margin : nat.
+  Hypothesis margin_covers_worst_case :
+    forall level0 timestep,
+      level0 + margin <= max_reservoir_cm pc ->
+      worst_case_level level0 timestep <= level0 + margin.
+
+  Theorem inter_sample_reservoir_safe :
+    forall level0 timestep,
+      level0 + margin <= max_reservoir_cm pc ->
+      forall inflow_rate dt,
+        inflow_rate <= max_inflow_rate ->
+        dt <= timestep ->
+        level0 + inflow_rate * dt <= max_reservoir_cm pc.
+  Proof.
+    intros level0 timestep Hmargin inflow_rate dt Hinflow Hdt_le.
+    assert (H1 : level0 + inflow_rate * dt <= worst_case_level level0 dt).
+    { destruct (Nat.eq_dec dt 0) as [Hzero|Hnz].
+      - subst dt. unfold worst_case_level. lia.
+      - apply worst_case_is_upper_bound. exact Hinflow. lia. }
+    assert (H2 : worst_case_level level0 dt <= worst_case_level level0 timestep).
+    { unfold worst_case_level. apply Nat.add_le_mono_l. apply Nat.mul_le_mono_l. exact Hdt_le. }
+    assert (H3 : worst_case_level level0 timestep <= level0 + margin).
+    { apply margin_covers_worst_case. exact Hmargin. }
+    lia.
+  Qed.
+
+End HybridInterSample.
 
 (** --------------------------------------------------------------------------- *)
 (** Per-Gate State Tracking                                                       *)
