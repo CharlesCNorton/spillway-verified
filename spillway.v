@@ -4449,6 +4449,89 @@ Section SensorErrorModeling.
     - simpl. rewrite In_insert_sorted. rewrite IH. intuition.
   Qed.
 
+  Fixpoint Sorted (l : list nat) : Prop :=
+    match l with
+    | nil => True
+    | x :: rest => match rest with
+                   | nil => True
+                   | y :: _ => x <= y /\ Sorted rest
+                   end
+    end.
+
+  Lemma insert_sorted_head_le :
+    forall x h l, Sorted (h :: l) -> x <= h -> Sorted (x :: h :: l).
+  Proof.
+    intros x h l Hsort Hle. simpl. split; assumption.
+  Qed.
+
+  Lemma insert_sorted_Sorted :
+    forall x l, Sorted l -> Sorted (insert_sorted x l).
+  Proof.
+    intros x l. induction l as [|h t IH]; intro Hsort.
+    - simpl. exact I.
+    - simpl. destruct (Nat.leb x h) eqn:Hle.
+      + apply Nat.leb_le in Hle.
+        apply insert_sorted_head_le; assumption.
+      + apply Nat.leb_gt in Hle.
+        destruct t as [|h' t'].
+        * simpl. lia.
+        * simpl in Hsort. destruct Hsort as [Hhh' Hsort'].
+          specialize (IH Hsort').
+          simpl. simpl in IH. destruct (Nat.leb x h') eqn:Hle'.
+          -- apply Nat.leb_le in Hle'. simpl. split; [lia|]. exact IH.
+          -- apply Nat.leb_gt in Hle'.
+             destruct (insert_sorted x t') as [|n rest] eqn:Hins.
+             ++ simpl. lia.
+             ++ simpl. simpl in IH. split; [lia|]. exact IH.
+  Qed.
+
+  Lemma sort_Sorted :
+    forall l, Sorted (sort_values l).
+  Proof.
+    induction l as [|h t IH].
+    - simpl. exact I.
+    - simpl. apply insert_sorted_Sorted. exact IH.
+  Qed.
+
+  Lemma Sorted_tail :
+    forall h t, Sorted (h :: t) -> Sorted t.
+  Proof.
+    intros h t Hsort. destruct t; simpl in *; auto. destruct Hsort; assumption.
+  Qed.
+
+  Lemma Sorted_head_le_next :
+    forall a b t, Sorted (a :: b :: t) -> a <= b.
+  Proof.
+    intros a b t Hsort. simpl in Hsort. destruct Hsort; assumption.
+  Qed.
+
+  Lemma Sorted_trans :
+    forall a t n d, Sorted (a :: t) -> n < length t -> a <= nth_default n t d.
+  Proof.
+    intros a t. revert a.
+    induction t as [|b t' IH]; intros a n d Hsort Hn.
+    - simpl in Hn. lia.
+    - destruct n.
+      + simpl. apply Sorted_head_le_next with (t := t'). exact Hsort.
+      + simpl. simpl in Hn.
+        assert (Hab : a <= b) by (apply Sorted_head_le_next with (t := t'); exact Hsort).
+        assert (Hsort' : Sorted (b :: t')) by (apply Sorted_tail with (h := a); exact Hsort).
+        assert (Hrec : b <= nth_default n t' d) by (apply IH; auto; lia).
+        lia.
+  Qed.
+
+  Lemma Sorted_monotone :
+    forall l i j d, Sorted l -> i <= j -> j < length l -> nth_default i l d <= nth_default j l d.
+  Proof.
+    intros l i j d Hsort Hij Hj.
+    revert i j Hij Hj.
+    induction l as [|h t IH]; intros i j Hij Hj.
+    { simpl in Hj. lia. }
+    destruct i; destruct j; try lia; simpl; simpl in Hj.
+    { apply Sorted_trans; [exact Hsort | lia]. }
+    apply IH; [apply Sorted_tail with (h := h); exact Hsort | lia | lia].
+  Qed.
+
   (** Extract honest sensor values. *)
   Definition honest_values (arr : TaggedArray) : list nat :=
     map (fun ts => sr_value (ts_reading ts))
