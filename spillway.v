@@ -16,7 +16,7 @@
 
 (** ROADMAP:
      [x] 1.  Model multiple sensors with disagreement, prove fusion margin
-     [ ] 2.  Add Byzantine sensor model, prove k-of-n voting safety
+     [~] 2.  Add Byzantine sensor model, prove k-of-n voting safety
      [ ] 3.  Define Lyapunov V(level), prove dV/dt < 0 outside target band
      [ ] 4.  Prove MPC constraints from KKT or barrier structure
      [ ] 5.  Add hybrid automaton, prove inter-sample bounds
@@ -4318,6 +4318,364 @@ Section SensorErrorModeling.
     intros true_val s1 s2 [Hv1_le Ht1_le] [Hv2_le Ht2_le].
     lia.
   Qed.
+
+  (** -------------------------------------------------------------------------- *)
+  (** Byzantine Sensor Model                                                      *)
+  (**                                                                             *)
+  (** Up to f sensors may be Byzantine (report arbitrary values).                 *)
+  (** With n >= 2f+1 sensors, median voting guarantees safety.                    *)
+  (** -------------------------------------------------------------------------- *)
+
+  (** A sensor is either honest (valid) or Byzantine (arbitrary value). *)
+  Inductive SensorStatus :=
+    | Honest
+    | Byzantine.
+
+  (** Tagged sensor: reading paired with its trust status. *)
+  Record TaggedSensor := mkTaggedSensor {
+    ts_reading : SensorReading;
+    ts_status : SensorStatus
+  }.
+
+  (** Array of tagged sensors. *)
+  Definition TaggedArray := list TaggedSensor.
+
+  (** Count Byzantine sensors in array. *)
+  Fixpoint count_byzantine (arr : TaggedArray) : nat :=
+    match arr with
+    | nil => 0
+    | ts :: rest =>
+        match ts_status ts with
+        | Byzantine => S (count_byzantine rest)
+        | Honest => count_byzantine rest
+        end
+    end.
+
+  (** Count honest sensors in array. *)
+  Fixpoint count_honest (arr : TaggedArray) : nat :=
+    match arr with
+    | nil => 0
+    | ts :: rest =>
+        match ts_status ts with
+        | Honest => S (count_honest rest)
+        | Byzantine => count_honest rest
+        end
+    end.
+
+  (** All honest sensors are valid w.r.t. true value. *)
+  Definition honest_sensors_valid (true_val : nat) (arr : TaggedArray) : Prop :=
+    forall ts, In ts arr -> ts_status ts = Honest ->
+      sensor_valid true_val (ts_reading ts).
+
+  (** Total sensors = honest + byzantine. *)
+  Lemma count_total :
+    forall arr, count_honest arr + count_byzantine arr = length arr.
+  Proof.
+    induction arr as [|ts rest IH].
+    - reflexivity.
+    - simpl. destruct (ts_status ts); simpl; lia.
+  Qed.
+
+  (** Insert value into sorted list. *)
+  Fixpoint insert_sorted (x : nat) (l : list nat) : list nat :=
+    match l with
+    | nil => x :: nil
+    | h :: t => if Nat.leb x h then x :: h :: t else h :: insert_sorted x t
+    end.
+
+  (** Insertion sort for list of nats. *)
+  Fixpoint sort_values (l : list nat) : list nat :=
+    match l with
+    | nil => nil
+    | h :: t => insert_sorted h (sort_values t)
+    end.
+
+  (** Extract values from tagged array. *)
+  Definition extract_values (arr : TaggedArray) : list nat :=
+    map (fun ts => sr_value (ts_reading ts)) arr.
+
+  (** Get nth element with default. *)
+  Fixpoint nth_default (n : nat) (l : list nat) (d : nat) : nat :=
+    match l with
+    | nil => d
+    | h :: t => match n with
+                | O => h
+                | S n' => nth_default n' t d
+                end
+    end.
+
+  (** Median vote: sort values and take middle element.
+      For n values, median is at index n/2 (0-indexed).
+      With n >= 2f+1, at least f+1 honest sensors exist,
+      so median is bounded by an honest sensor's value. *)
+  Definition median_vote (arr : TaggedArray) : nat :=
+    let vals := sort_values (extract_values arr) in
+    let mid := length vals / 2 in
+    nth_default mid vals 0.
+
+  (** insert_sorted preserves length + 1. *)
+  Lemma insert_sorted_length :
+    forall x l, length (insert_sorted x l) = S (length l).
+  Proof.
+    intros x l. induction l as [|h t IH].
+    - reflexivity.
+    - simpl. destruct (Nat.leb x h); simpl; lia.
+  Qed.
+
+  (** sort_values preserves length. *)
+  Lemma sort_length :
+    forall l, length (sort_values l) = length l.
+  Proof.
+    induction l as [|h t IH].
+    - reflexivity.
+    - simpl. rewrite insert_sorted_length. lia.
+  Qed.
+
+  (** Element is in insert_sorted result iff it's x or in original list. *)
+  Lemma In_insert_sorted :
+    forall x y l, In y (insert_sorted x l) <-> y = x \/ In y l.
+  Proof.
+    intros x y l. induction l as [|h t IH]; simpl.
+    - intuition.
+    - destruct (Nat.leb x h); simpl; rewrite ?IH; intuition.
+  Qed.
+
+  (** Sorting preserves elements. *)
+  Lemma In_sort :
+    forall x l, In x (sort_values l) <-> In x l.
+  Proof.
+    intros x l. induction l as [|h t IH].
+    - reflexivity.
+    - simpl. rewrite In_insert_sorted. rewrite IH. intuition.
+  Qed.
+
+  (** Extract honest sensor values. *)
+  Definition honest_values (arr : TaggedArray) : list nat :=
+    map (fun ts => sr_value (ts_reading ts))
+        (filter (fun ts => match ts_status ts with Honest => true | Byzantine => false end) arr).
+
+  (** Maximum error bound among honest sensors. *)
+  Definition max_honest_error (arr : TaggedArray) : nat :=
+    fold_right Nat.max 0
+      (map (fun ts => sr_error_bound (ts_reading ts))
+           (filter (fun ts => match ts_status ts with Honest => true | Byzantine => false end) arr)).
+
+  Lemma fold_max_le :
+    forall l v, In v l -> v <= fold_right Nat.max 0 l.
+  Proof.
+    induction l as [|h t IH]; intros v Hin.
+    - inversion Hin.
+    - simpl. destruct Hin as [Heq|Hin'].
+      + subst. lia.
+      + specialize (IH v Hin'). lia.
+  Qed.
+
+  Lemma max_honest_error_bounds :
+    forall arr ts,
+      In ts arr -> ts_status ts = Honest ->
+      sr_error_bound (ts_reading ts) <= max_honest_error arr.
+  Proof.
+    intros arr ts Hin Hhonest.
+    unfold max_honest_error.
+    apply fold_max_le.
+    apply in_map_iff. exists ts. split; auto.
+    apply filter_In. split; auto.
+    rewrite Hhonest. reflexivity.
+  Qed.
+
+  Lemma honest_value_bounds :
+    forall true_val arr ts,
+      honest_sensors_valid true_val arr ->
+      In ts arr -> ts_status ts = Honest ->
+      sr_value (ts_reading ts) <= true_val + sr_error_bound (ts_reading ts).
+  Proof.
+    intros true_val arr ts Hvalid Hin Hhonest.
+    unfold honest_sensors_valid in Hvalid.
+    specialize (Hvalid ts Hin Hhonest).
+    unfold sensor_valid in Hvalid.
+    destruct Hvalid as [Hle _]. exact Hle.
+  Qed.
+
+  Lemma nth_default_le_max :
+    forall n l d, n < length l -> nth_default n l d <= fold_right Nat.max d l.
+  Proof.
+    intros n l. generalize dependent n.
+    induction l as [|h t IH]; intros n d Hlen.
+    - simpl in Hlen. lia.
+    - simpl. destruct n.
+      + simpl. lia.
+      + simpl. simpl in Hlen.
+        assert (Ht : n < length t) by lia.
+        specialize (IH n d Ht). lia.
+  Qed.
+
+  Lemma max_values_le :
+    forall arr true_val,
+      honest_sensors_valid true_val arr ->
+      (forall ts, In ts arr -> ts_status ts = Honest ->
+        sr_value (ts_reading ts) <= true_val + max_honest_error arr).
+  Proof.
+    intros arr true_val Hvalid ts Hin Hhonest.
+    assert (Hbound : sr_value (ts_reading ts) <= true_val + sr_error_bound (ts_reading ts)).
+    { unfold honest_sensors_valid in Hvalid.
+      specialize (Hvalid ts Hin Hhonest).
+      unfold sensor_valid in Hvalid.
+      destruct Hvalid as [Hle _]. exact Hle. }
+    assert (Herr : sr_error_bound (ts_reading ts) <= max_honest_error arr).
+    { apply max_honest_error_bounds; assumption. }
+    lia.
+  Qed.
+
+  (** BYZANTINE VOTING SAFETY: With honest majority, median is safe.
+      If more honest sensors than Byzantine, and all honest sensors are valid,
+      then median_vote is within max_honest_error of true value.
+
+      Key insight: In a sorted list, the median is bounded by honest values
+      when honest sensors outnumber Byzantine ones. Byzantine sensors can
+      push the median at most to the boundary of honest sensor range. *)
+  Definition max_honest_value (arr : TaggedArray) : nat :=
+    fold_right Nat.max 0 (honest_values arr).
+
+  Definition min_honest_value (arr : TaggedArray) : nat :=
+    match honest_values arr with
+    | nil => 0
+    | h :: t => fold_right Nat.min h t
+    end.
+
+  Lemma honest_count_filter_length :
+    forall arr, count_honest arr = length (filter (fun ts => match ts_status ts with Honest => true | Byzantine => false end) arr).
+  Proof.
+    induction arr as [|h t IH].
+    - reflexivity.
+    - simpl. destruct (ts_status h); simpl; rewrite IH; reflexivity.
+  Qed.
+
+  Lemma honest_values_length :
+    forall arr, length (honest_values arr) = count_honest arr.
+  Proof.
+    intros arr.
+    unfold honest_values.
+    rewrite map_length.
+    rewrite honest_count_filter_length.
+    reflexivity.
+  Qed.
+
+  Lemma max_honest_value_bound :
+    forall true_val arr,
+      honest_sensors_valid true_val arr ->
+      max_honest_value arr <= true_val + max_honest_error arr.
+  Proof.
+    intros true_val arr Hvalid.
+    unfold max_honest_value, honest_values, max_honest_error.
+    induction arr as [|h t IH].
+    - simpl. lia.
+    - simpl.
+      destruct (ts_status h) eqn:Hstat; simpl.
+      + assert (Hh_bound : sr_value (ts_reading h) <= true_val + sr_error_bound (ts_reading h)).
+        { unfold honest_sensors_valid in Hvalid.
+          assert (Hin : In h (h :: t)) by (left; reflexivity).
+          specialize (Hvalid h Hin Hstat).
+          unfold sensor_valid in Hvalid.
+          destruct Hvalid as [Hle _]. exact Hle. }
+        assert (Hvalid' : honest_sensors_valid true_val t).
+        { unfold honest_sensors_valid in *. intros ts Hin Hts.
+          apply Hvalid. right. exact Hin. exact Hts. }
+        specialize (IH Hvalid').
+        lia.
+      + assert (Hvalid' : honest_sensors_valid true_val t).
+        { unfold honest_sensors_valid in *. intros ts Hin Hts.
+          apply Hvalid. right. exact Hin. exact Hts. }
+        specialize (IH Hvalid').
+        exact IH.
+  Qed.
+
+  Lemma nth_default_In :
+    forall n l d, n < length l -> In (nth_default n l d) l.
+  Proof.
+    intros n l. generalize dependent n.
+    induction l as [|h t IH]; intros n d Hlen.
+    - simpl in Hlen. lia.
+    - simpl. destruct n.
+      + left. reflexivity.
+      + right. apply IH. simpl in Hlen. lia.
+  Qed.
+
+  Lemma In_sort_extract :
+    forall v arr, In v (sort_values (extract_values arr)) -> In v (extract_values arr).
+  Proof.
+    intros v arr Hin.
+    rewrite In_sort in Hin. exact Hin.
+  Qed.
+
+  Lemma extract_values_from_tagged :
+    forall v arr, In v (extract_values arr) ->
+      exists ts, In ts arr /\ sr_value (ts_reading ts) = v.
+  Proof.
+    intros v arr Hin.
+    unfold extract_values in Hin.
+    apply in_map_iff in Hin.
+    destruct Hin as [ts [Heq Hin]].
+    exists ts. split; auto.
+  Qed.
+
+  Lemma median_le_max_honest :
+    forall arr,
+      count_honest arr > count_byzantine arr ->
+      count_honest arr > 0 ->
+      median_vote arr <= max_honest_value arr.
+  Proof.
+    intros arr Hmaj Hpos.
+    unfold median_vote.
+    set (vals := sort_values (extract_values arr)).
+    set (mid := length vals / 2).
+    destruct (Nat.eq_dec (length vals) 0) as [Hzero|Hnonzero].
+    - unfold vals in Hzero. rewrite sort_length in Hzero.
+      unfold extract_values in Hzero. rewrite map_length in Hzero.
+      assert (Htot := count_total arr). lia.
+    - assert (Hmid_lt : mid < length vals).
+      { unfold mid. apply Nat.Div0.div_lt_upper_bound; lia. }
+      assert (Hmed_in : In (nth_default mid vals 0) vals).
+      { apply nth_default_In. exact Hmid_lt. }
+      unfold vals in Hmed_in.
+      apply In_sort_extract in Hmed_in.
+      apply extract_values_from_tagged in Hmed_in.
+      destruct Hmed_in as [ts [Hin_arr Heq]].
+      destruct (ts_status ts) eqn:Hstat.
+      + unfold max_honest_value, vals.
+        rewrite <- Heq.
+        apply fold_max_le.
+        unfold honest_values.
+        apply in_map_iff. exists ts. split; auto.
+        apply filter_In. split; auto. rewrite Hstat. reflexivity.
+      + unfold max_honest_value.
+        assert (Hsome_honest_val : honest_values arr <> nil).
+        { unfold honest_values. intro Hnil.
+          apply map_eq_nil in Hnil.
+          assert (Hfilter_len : length (filter (fun ts => match ts_status ts with Honest => true | Byzantine => false end) arr) = 0).
+          { rewrite Hnil. reflexivity. }
+          rewrite <- honest_count_filter_length in Hfilter_len.
+          lia. }
+        destruct (honest_values arr) as [|hv rest] eqn:Hhv.
+        * contradiction.
+        * simpl.
+          admit.
+  Admitted.
+
+  Theorem byzantine_median_safe :
+    forall true_val arr,
+      count_honest arr > count_byzantine arr ->
+      honest_sensors_valid true_val arr ->
+      median_vote arr <= true_val + max_honest_error arr + max_honest_error arr.
+  Proof.
+    intros true_val arr Hmaj Hvalid.
+    pose proof (@max_honest_value_bound true_val arr Hvalid) as Hmax_honest.
+    unfold median_vote.
+    destruct (extract_values arr) eqn:Hextract.
+    - simpl. lia.
+    - assert (Hmedian_le_max_honest : nth_default (length (sort_values (n :: l)) / 2) (sort_values (n :: l)) 0 <= max_honest_value arr + max_honest_error arr).
+      { admit. }
+      lia.
+  Admitted.
 
   (** Effective margin must account for sensor error.
       If margin is M and sensor error is E, we need M > E for safety. *)
