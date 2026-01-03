@@ -15,26 +15,21 @@
 (******************************************************************************)
 
 (** ROADMAP:
-     [x] 1.  Compute |stage_linear - stage_manning| <= e, add e to margin
-     [x] 2.  Bound linearization error, prove safety within Manning envelope
-     [x] 3.  Parameterize consistency proof, characterize valid config polytope
-     [x] 4.  Thread actuator lag through step/run, prove safety with delay
-     [x] 5.  Model per-gate hydraulics with interference, prove aggregate bound
-     [ ] 6.  Replace linear attenuation with Saint-Venant or Ritter bounds
-     [ ] 7.  Formalize unit hydrograph, derive worst-case from rainfall
-     [ ] 8.  Add distributions (Gaussian, GEV), prove chance-constrained safety
-     [ ] 9.  Model multiple sensors with disagreement, prove fusion margin
-     [ ] 10. Add Byzantine sensor model, prove k-of-n voting safety
-     [ ] 11. Define Lyapunov V(level), prove dV/dt < 0 outside target band
-     [ ] 12. Prove MPC constraints from KKT or barrier structure
-     [ ] 13. Add hybrid automaton, prove inter-sample bounds
-     [ ] 14. Add event-triggered variant, prove minimum inter-event time
-     [ ] 15. Add operator_override mode, prove manual commands safe
-     [ ] 16. Define Modbus/DNP3 format, prove protocol invariants
-     [ ] 17. Encode USGS gauge data for 1983/2011 floods, validate response
-     [ ] 18. Uncomment extraction, compile OCaml, test against vectors
-     [ ] 19. Extract to C, run WCET analyzer, prove deadline meets timestep
-     [ ] 20. Map Coq predicates to FERC Part 12D checklist
+     [ ] 1.  Replace linear attenuation with Saint-Venant or Ritter bounds
+     [ ] 2.  Formalize unit hydrograph, derive worst-case from rainfall
+     [ ] 3.  Add distributions (Gaussian, GEV), prove chance-constrained safety
+     [ ] 4.  Model multiple sensors with disagreement, prove fusion margin
+     [ ] 5.  Add Byzantine sensor model, prove k-of-n voting safety
+     [ ] 6.  Define Lyapunov V(level), prove dV/dt < 0 outside target band
+     [ ] 7.  Prove MPC constraints from KKT or barrier structure
+     [ ] 8.  Add hybrid automaton, prove inter-sample bounds
+     [ ] 9.  Add event-triggered variant, prove minimum inter-event time
+     [ ] 10. Add operator_override mode, prove manual commands safe
+     [ ] 11. Define Modbus/DNP3 format, prove protocol invariants
+     [ ] 12. Encode USGS gauge data for 1983/2011 floods, validate response
+     [ ] 13. Uncomment extraction, compile OCaml, test against vectors
+     [ ] 14. Extract to C, run WCET analyzer, prove deadline meets timestep
+     [ ] 15. Map Coq predicates to FERC Part 12D checklist
 *)
 
 From Coq Require Import Arith Lia List ZArith Program.
