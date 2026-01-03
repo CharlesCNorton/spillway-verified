@@ -17,12 +17,10 @@
 (** ROADMAP:
      [~] 1.  Add Byzantine sensor model, prove k-of-n voting safety
      [ ] 2.  Prove MPC constraints from KKT or barrier structure
-     [x] 3.  Add event-triggered variant, prove minimum inter-event time
-     [ ] 4.  Define Modbus/DNP3 format, prove protocol invariants
-     [x] 5.  Encode USGS gauge data for 1983/2011 floods, validate response
-     [ ] 6.  Uncomment extraction, compile OCaml, test against vectors
-     [ ] 7.  Extract to C, run WCET analyzer, prove deadline meets timestep
-     [ ] 8.  Map Coq predicates to FERC Part 12D checklist
+     [ ] 3.  Define Modbus/DNP3 format, prove protocol invariants
+     [ ] 4.  Uncomment extraction, compile OCaml, test against vectors
+     [ ] 5.  Extract to C, run WCET analyzer, prove deadline meets timestep
+     [ ] 6.  Map Coq predicates to FERC Part 12D checklist
 *)
 
 From Coq Require Import Arith Lia List ZArith Program.
