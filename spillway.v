@@ -17,7 +17,7 @@
 (** ROADMAP:
      [~] 1.  Add Byzantine sensor model, prove k-of-n voting safety
      [ ] 2.  Prove MPC constraints from KKT or barrier structure
-     [ ] 3.  Define Modbus/DNP3 format, prove protocol invariants
+     [x] 3.  Define Modbus/DNP3 format, prove protocol invariants
      [ ] 4.  Uncomment extraction, compile OCaml, test against vectors
      [ ] 5.  Extract to C, run WCET analyzer, prove deadline meets timestep
      [ ] 6.  Map Coq predicates to FERC Part 12D checklist
@@ -3886,6 +3886,137 @@ Section EventTriggered.
   Qed.
 
 End EventTriggered.
+
+(** --------------------------------------------------------------------------- *)
+(** Industrial Protocol Formats: Modbus and DNP3                                  *)
+(**                                                                              *)
+(** Defines packet structures for SCADA communication protocols.                 *)
+(** Proves field bounds and message validity invariants.                         *)
+(** --------------------------------------------------------------------------- *)
+
+Section ModbusProtocol.
+
+  Definition modbus_addr_max : nat := 247.
+  Definition modbus_func_max : nat := 127.
+  Definition modbus_data_max : nat := 252.
+
+  Record ModbusFrame := mkModbusFrame {
+    mb_address : nat;
+    mb_function : nat;
+    mb_data_len : nat;
+    mb_crc : nat
+  }.
+
+  Definition modbus_addr_valid (f : ModbusFrame) : Prop :=
+    mb_address f <= modbus_addr_max.
+
+  Definition modbus_func_valid (f : ModbusFrame) : Prop :=
+    mb_function f <= modbus_func_max.
+
+  Definition modbus_len_valid (f : ModbusFrame) : Prop :=
+    mb_data_len f <= modbus_data_max.
+
+  Definition modbus_frame_valid (f : ModbusFrame) : Prop :=
+    modbus_addr_valid f /\ modbus_func_valid f /\ modbus_len_valid f.
+
+  Definition modbus_frame_valid_bool (f : ModbusFrame) : bool :=
+    Nat.leb (mb_address f) modbus_addr_max &&
+    Nat.leb (mb_function f) modbus_func_max &&
+    Nat.leb (mb_data_len f) modbus_data_max.
+
+  Lemma modbus_valid_bool_correct :
+    forall f, modbus_frame_valid_bool f = true <-> modbus_frame_valid f.
+  Proof.
+    intros f. unfold modbus_frame_valid_bool, modbus_frame_valid,
+      modbus_addr_valid, modbus_func_valid, modbus_len_valid.
+    rewrite !Bool.andb_true_iff, !Nat.leb_le.
+    tauto.
+  Qed.
+
+  Definition modbus_read_holding : nat := 3.
+  Definition modbus_write_single : nat := 6.
+  Definition modbus_write_multiple : nat := 16.
+
+  Definition is_read_command (f : ModbusFrame) : bool :=
+    Nat.eqb (mb_function f) modbus_read_holding.
+
+  Definition is_write_command (f : ModbusFrame) : bool :=
+    Nat.eqb (mb_function f) modbus_write_single ||
+    Nat.eqb (mb_function f) modbus_write_multiple.
+
+End ModbusProtocol.
+
+Section DNP3Protocol.
+
+  Definition dnp3_addr_max : nat := 65519.
+  Definition dnp3_frag_max : nat := 2048.
+
+  Inductive DNP3FunctionCode : Set :=
+  | DNP3_Confirm
+  | DNP3_Read
+  | DNP3_Write
+  | DNP3_DirectOperate
+  | DNP3_DirectOperateNoAck
+  | DNP3_FreezeAndClear
+  | DNP3_Response
+  | DNP3_UnsolicitedResponse.
+
+  Record DNP3Frame := mkDNP3Frame {
+    dnp3_start : nat;
+    dnp3_length : nat;
+    dnp3_control : nat;
+    dnp3_dest_addr : nat;
+    dnp3_src_addr : nat;
+    dnp3_func : DNP3FunctionCode
+  }.
+
+  Definition dnp3_start_bytes : nat := 1380.
+
+  Definition dnp3_start_valid (f : DNP3Frame) : Prop :=
+    dnp3_start f = dnp3_start_bytes.
+
+  Definition dnp3_addr_valid (f : DNP3Frame) : Prop :=
+    dnp3_dest_addr f <= dnp3_addr_max /\ dnp3_src_addr f <= dnp3_addr_max.
+
+  Definition dnp3_len_valid (f : DNP3Frame) : Prop :=
+    dnp3_length f <= dnp3_frag_max.
+
+  Definition dnp3_frame_valid (f : DNP3Frame) : Prop :=
+    dnp3_start_valid f /\ dnp3_addr_valid f /\ dnp3_len_valid f.
+
+  Definition is_dnp3_request (f : DNP3Frame) : bool :=
+    match dnp3_func f with
+    | DNP3_Read => true
+    | DNP3_Write => true
+    | DNP3_DirectOperate => true
+    | DNP3_DirectOperateNoAck => true
+    | _ => false
+    end.
+
+  Definition is_dnp3_response (f : DNP3Frame) : bool :=
+    match dnp3_func f with
+    | DNP3_Response => true
+    | DNP3_UnsolicitedResponse => true
+    | _ => false
+    end.
+
+  Lemma request_not_response :
+    forall f, is_dnp3_request f = true -> is_dnp3_response f = false.
+  Proof.
+    intros f Hreq.
+    unfold is_dnp3_request, is_dnp3_response in *.
+    destruct (dnp3_func f); auto; discriminate.
+  Qed.
+
+  Lemma response_not_request :
+    forall f, is_dnp3_response f = true -> is_dnp3_request f = false.
+  Proof.
+    intros f Hresp.
+    unfold is_dnp3_request, is_dnp3_response in *.
+    destruct (dnp3_func f); auto; discriminate.
+  Qed.
+
+End DNP3Protocol.
 
 (** --------------------------------------------------------------------------- *)
 (** Per-Gate State Tracking                                                       *)
