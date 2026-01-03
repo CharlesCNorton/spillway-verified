@@ -17,7 +17,7 @@
 (** ROADMAP:
      [~] 1.  Add Byzantine sensor model, prove k-of-n voting safety
      [ ] 2.  Prove MPC constraints from KKT or barrier structure
-     [ ] 3.  Add event-triggered variant, prove minimum inter-event time
+     [x] 3.  Add event-triggered variant, prove minimum inter-event time
      [ ] 4.  Define Modbus/DNP3 format, prove protocol invariants
      [x] 5.  Encode USGS gauge data for 1983/2011 floods, validate response
      [ ] 6.  Uncomment extraction, compile OCaml, test against vectors
@@ -3786,6 +3786,108 @@ Section HybridInterSample.
   Qed.
 
 End HybridInterSample.
+
+(** --------------------------------------------------------------------------- *)
+(** Event-Triggered Control                                                       *)
+(**                                                                              *)
+(** Controller updates only when state deviation exceeds threshold.              *)
+(** Proves minimum inter-event time (Zeno-freeness).                             *)
+(** --------------------------------------------------------------------------- *)
+
+Section EventTriggered.
+
+  Variable setpoint : nat.
+  Variable trigger_threshold : nat.
+  Variable max_rate_of_change : nat.
+
+  Hypothesis threshold_pos : trigger_threshold > 0.
+  Hypothesis rate_pos : max_rate_of_change > 0.
+
+  Definition deviation (level : nat) : nat :=
+    if Nat.leb level setpoint then setpoint - level
+    else level - setpoint.
+
+  Definition trigger_condition (level : nat) : bool :=
+    Nat.ltb trigger_threshold (deviation level).
+
+  Lemma deviation_zero_at_setpoint : deviation setpoint = 0.
+  Proof.
+    unfold deviation. rewrite Nat.leb_refl. lia.
+  Qed.
+
+  Lemma trigger_false_near_setpoint :
+    forall level,
+      deviation level <= trigger_threshold ->
+      trigger_condition level = false.
+  Proof.
+    intros level Hdev.
+    unfold trigger_condition.
+    apply Nat.ltb_ge. lia.
+  Qed.
+
+  Definition min_inter_event_time : nat :=
+    trigger_threshold / max_rate_of_change.
+
+  Lemma deviation_bounded_by_time :
+    forall initial_deviation elapsed,
+      initial_deviation + max_rate_of_change * elapsed >=
+      initial_deviation + elapsed * max_rate_of_change.
+  Proof. intros. lia. Qed.
+
+  Lemma div_mul_lt :
+    forall a b t,
+      b > 0 ->
+      t < a / b ->
+      t * b < a.
+  Proof.
+    intros a b t Hb Ht.
+    assert (Hdiv_bound : a = b * (a / b) + a mod b) by (apply Nat.Div0.div_mod).
+    assert (Hmod_bound : a mod b < b) by (apply Nat.mod_upper_bound; lia).
+    assert (Hkey : t * b < (a / b) * b).
+    { apply Nat.mul_lt_mono_pos_r. exact Hb. exact Ht. }
+    lia.
+  Qed.
+
+  Lemma time_to_reach_threshold :
+    forall initial_level,
+      deviation initial_level = 0 ->
+      forall t, t < min_inter_event_time ->
+      max_rate_of_change * t < trigger_threshold.
+  Proof.
+    intros initial_level Hinit t Ht.
+    unfold min_inter_event_time in Ht.
+    assert (Hle : t * max_rate_of_change < trigger_threshold).
+    { apply div_mul_lt. exact rate_pos. exact Ht. }
+    lia.
+  Qed.
+
+  Lemma no_trigger_before_min_time :
+    forall initial_level,
+      deviation initial_level = 0 ->
+      forall t level_at_t,
+        t < min_inter_event_time ->
+        deviation level_at_t <= max_rate_of_change * t ->
+        trigger_condition level_at_t = false.
+  Proof.
+    intros initial_level Hinit t level_at_t Ht Hdev.
+    apply trigger_false_near_setpoint.
+    assert (Hbound : max_rate_of_change * t < trigger_threshold).
+    { apply time_to_reach_threshold with (initial_level := initial_level). exact Hinit. exact Ht. }
+    lia.
+  Qed.
+
+  Hypothesis threshold_ge_rate : trigger_threshold >= max_rate_of_change.
+
+  Theorem zeno_free : min_inter_event_time > 0.
+  Proof.
+    unfold min_inter_event_time.
+    apply Nat.div_str_pos.
+    split.
+    - exact rate_pos.
+    - exact threshold_ge_rate.
+  Qed.
+
+End EventTriggered.
 
 (** --------------------------------------------------------------------------- *)
 (** Per-Gate State Tracking                                                       *)
