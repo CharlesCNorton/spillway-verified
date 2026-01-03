@@ -15,7 +15,7 @@
 (******************************************************************************)
 
 (** ROADMAP:
-     [ ] 1.  Model multiple sensors with disagreement, prove fusion margin
+     [x] 1.  Model multiple sensors with disagreement, prove fusion margin
      [ ] 2.  Add Byzantine sensor model, prove k-of-n voting safety
      [ ] 3.  Define Lyapunov V(level), prove dV/dt < 0 outside target band
      [ ] 4.  Prove MPC constraints from KKT or barrier structure
@@ -4184,6 +4184,141 @@ Section SensorErrorModeling.
       measured_level t <= true_level t + sensor_error_bound_cm /\
       true_level t <= measured_level t + sensor_error_bound_cm.
 
+  (** Individual sensor reading with its own error bound. *)
+  Record SensorReading := mkSensorReading {
+    sr_value : nat;
+    sr_error_bound : nat
+  }.
+
+  (** Array of sensor readings from multiple sensors. *)
+  Definition SensorArray := list SensorReading.
+
+  (** A sensor reading is valid if it measures true_val within its error bound. *)
+  Definition sensor_valid (true_val : nat) (s : SensorReading) : Prop :=
+    sr_value s <= true_val + sr_error_bound s /\
+    true_val <= sr_value s + sr_error_bound s.
+
+  (** All sensors in array are valid w.r.t. true value. *)
+  Definition all_sensors_valid (true_val : nat) (arr : SensorArray) : Prop :=
+    Forall (sensor_valid true_val) arr.
+
+  (** Maximum sensor reading value in array. *)
+  Fixpoint max_reading (arr : SensorArray) : nat :=
+    match arr with
+    | nil => 0
+    | s :: rest => Nat.max (sr_value s) (max_reading rest)
+    end.
+
+  (** Maximum error bound across all sensors in array. *)
+  Fixpoint max_error_bound (arr : SensorArray) : nat :=
+    match arr with
+    | nil => 0
+    | s :: rest => Nat.max (sr_error_bound s) (max_error_bound rest)
+    end.
+
+  (** Conservative fusion: use max reading as the fused estimate.
+      This ensures we never underestimate true level for safety. *)
+  Definition conservative_fused_level (arr : SensorArray) : nat :=
+    max_reading arr.
+
+  (** max_reading is at least as large as any sensor's value in the array. *)
+  Lemma max_reading_ge_any :
+    forall arr s, In s arr -> sr_value s <= max_reading arr.
+  Proof.
+    induction arr as [|h t IH]; intros s Hin.
+    - inversion Hin.
+    - simpl. destruct Hin as [Heq | Hin'].
+      + subst. apply Nat.le_max_l.
+      + specialize (IH s Hin'). lia.
+  Qed.
+
+  (** max_error_bound is at least as large as any sensor's error bound. *)
+  Lemma max_error_bound_ge_any :
+    forall arr s, In s arr -> sr_error_bound s <= max_error_bound arr.
+  Proof.
+    induction arr as [|h t IH]; intros s Hin.
+    - inversion Hin.
+    - simpl. destruct Hin as [Heq | Hin'].
+      + subst. apply Nat.le_max_l.
+      + specialize (IH s Hin'). lia.
+  Qed.
+
+  (** FUSION MARGIN THEOREM: True value is bounded by fused level + max error.
+      If all sensors are valid, the true value cannot exceed the conservative
+      fused level plus the maximum error bound across all sensors. *)
+  Theorem fusion_margin :
+    forall true_val arr,
+      arr <> nil ->
+      all_sensors_valid true_val arr ->
+      true_val <= conservative_fused_level arr + max_error_bound arr.
+  Proof.
+    intros true_val arr Hne Hvalid.
+    destruct arr as [|s rest].
+    - contradiction.
+    - unfold all_sensors_valid in Hvalid.
+      inversion Hvalid; subst.
+      unfold sensor_valid in *. destruct H1 as [_ Htrue_le].
+      unfold conservative_fused_level.
+      simpl.
+      assert (Hsr : sr_value s <= Nat.max (sr_value s) (max_reading rest)) by lia.
+      assert (Her : sr_error_bound s <= Nat.max (sr_error_bound s) (max_error_bound rest)) by lia.
+      lia.
+  Qed.
+
+  (** Reverse bound: fused level does not overestimate by more than max error. *)
+  Theorem fusion_margin_upper :
+    forall true_val arr,
+      all_sensors_valid true_val arr ->
+      conservative_fused_level arr <= true_val + max_error_bound arr.
+  Proof.
+    intros true_val arr Hvalid.
+    unfold conservative_fused_level.
+    induction arr as [|s rest IH].
+    - simpl. lia.
+    - simpl.
+      unfold all_sensors_valid in Hvalid.
+      inversion Hvalid; subst.
+      unfold sensor_valid in H1. destruct H1 as [Hval_le _].
+      assert (IH' : max_reading rest <= true_val + max_error_bound rest).
+      { apply IH. exact H2. }
+      assert (Heb : max_error_bound rest <= Nat.max (sr_error_bound s) (max_error_bound rest)) by lia.
+      lia.
+  Qed.
+
+  (** True safety: actual level is within bounds. *)
+  Definition true_safe (true_lvl : nat) : Prop :=
+    true_lvl <= max_reservoir_cm pc.
+
+  (** Fused safety: fused level + max error within reservoir max. *)
+  Definition fused_safe (arr : SensorArray) : Prop :=
+    conservative_fused_level arr + max_error_bound arr <= max_reservoir_cm pc.
+
+  (** Fused safety implies true safety for any valid sensor array. *)
+  Theorem fused_implies_true_safe :
+    forall true_val arr,
+      arr <> nil ->
+      all_sensors_valid true_val arr ->
+      fused_safe arr ->
+      true_safe true_val.
+  Proof.
+    intros true_val arr Hne Hvalid Hfused.
+    unfold true_safe, fused_safe in *.
+    pose proof (@fusion_margin true_val arr Hne Hvalid) as Hmargin.
+    lia.
+  Qed.
+
+  (** Sensor disagreement bound: any two valid sensors differ by at most
+      the sum of their error bounds (which is <= 2 * max_error_bound). *)
+  Theorem sensor_disagreement_bounded :
+    forall true_val s1 s2,
+      sensor_valid true_val s1 ->
+      sensor_valid true_val s2 ->
+      sr_value s1 <= sr_value s2 + sr_error_bound s1 + sr_error_bound s2.
+  Proof.
+    intros true_val s1 s2 [Hv1_le Ht1_le] [Hv2_le Ht2_le].
+    lia.
+  Qed.
+
   (** Effective margin must account for sensor error.
       If margin is M and sensor error is E, we need M > E for safety. *)
   Variable effective_margin_cm : nat.
@@ -4197,10 +4332,6 @@ Section SensorErrorModeling.
   (** Controller uses measured level but safety requires true level bounds. *)
   Definition measured_safe (measured_lvl : nat) : Prop :=
     measured_lvl + sensor_error_bound_cm <= max_reservoir_cm pc.
-
-  (** True safety: actual level is within bounds. *)
-  Definition true_safe (true_lvl : nat) : Prop :=
-    true_lvl <= max_reservoir_cm pc.
 
   (** Measured safety implies true safety when accounting for error. *)
   Lemma measured_implies_true_safe :
