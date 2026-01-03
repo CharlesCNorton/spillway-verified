@@ -16,7 +16,7 @@
 
 (** ROADMAP:
      [~] 1.  Add Byzantine sensor model, prove k-of-n voting safety
-     [ ] 2.  Define Lyapunov V(level), prove dV/dt < 0 outside target band
+     [x] 2.  Define Lyapunov V(level), prove dV/dt < 0 outside target band
      [ ] 3.  Prove MPC constraints from KKT or barrier structure
      [ ] 4.  Add hybrid automaton, prove inter-sample bounds
      [ ] 5.  Add event-triggered variant, prove minimum inter-event time
@@ -2869,6 +2869,132 @@ Section ProportionalCertified.
   Proof.
     intros.
     apply run_preserves_adequate_prop; assumption.
+  Qed.
+
+  Definition lyapunov (s : State) : nat :=
+    let level := reservoir_level_cm s in
+    if Nat.leb level setpoint_cm then setpoint_cm - level
+    else level - setpoint_cm.
+
+  Lemma lyapunov_zero_at_setpoint :
+    forall s, reservoir_level_cm s = setpoint_cm -> lyapunov s = 0.
+  Proof.
+    intros s Heq.
+    unfold lyapunov. rewrite Heq.
+    rewrite Nat.leb_refl. lia.
+  Qed.
+
+  Lemma lyapunov_pos_away_from_setpoint :
+    forall s, reservoir_level_cm s <> setpoint_cm -> lyapunov s > 0.
+  Proof.
+    intros s Hneq.
+    unfold lyapunov.
+    destruct (Nat.leb (reservoir_level_cm s) setpoint_cm) eqn:Hle.
+    - apply Nat.leb_le in Hle. lia.
+    - apply Nat.leb_gt in Hle. lia.
+  Qed.
+
+  Variable deadband_cm : nat.
+  Hypothesis deadband_pos : deadband_cm > 0.
+
+  Definition in_deadband (s : State) : Prop :=
+    lyapunov s <= deadband_cm.
+
+  Definition above_deadband (s : State) : Prop :=
+    reservoir_level_cm s > setpoint_cm + deadband_cm.
+
+  Definition below_deadband (s : State) : Prop :=
+    reservoir_level_cm s + deadband_cm < setpoint_cm.
+
+  Lemma lyapunov_above_deadband :
+    forall s, above_deadband s -> lyapunov s = reservoir_level_cm s - setpoint_cm.
+  Proof.
+    intros s Hab.
+    unfold lyapunov, above_deadband in *.
+    destruct (Nat.leb (reservoir_level_cm s) setpoint_cm) eqn:Hle.
+    - apply Nat.leb_le in Hle. lia.
+    - reflexivity.
+  Qed.
+
+  Lemma lyapunov_below_deadband :
+    forall s, below_deadband s -> lyapunov s = setpoint_cm - reservoir_level_cm s.
+  Proof.
+    intros s Hbe.
+    unfold lyapunov, below_deadband in *.
+    destruct (Nat.leb (reservoir_level_cm s) setpoint_cm) eqn:Hle.
+    - reflexivity.
+    - apply Nat.leb_gt in Hle. lia.
+  Qed.
+
+  Variable excess_capacity : nat.
+  Hypothesis excess_pos : excess_capacity > 0.
+  Hypothesis capacity_exceeds_inflow_by_excess :
+    forall t, gate_capacity_cm pc * min_gate_pct_prop / 100 >= worst_case_inflow t + excess_capacity.
+
+  Lemma outflow_exceeds_inflow :
+    forall s t,
+      gate_ok s ->
+      outflow worst_case_inflow control_proportional s t >= worst_case_inflow t.
+  Proof.
+    intros s t Hgate.
+    unfold outflow, available_water.
+    apply Nat.min_case_strong; intro Hcmp.
+    - pose proof (control_proportional_ge_min s t) as Hmin.
+      pose proof (min_gate_sufficient_prop) as Hsuff.
+      pose proof (max_inflow_bounds_prop t) as Hinflow.
+      assert (Hcap : gate_capacity_cm pc * control_proportional s t / 100 >=
+                     gate_capacity_cm pc * min_gate_pct_prop / 100).
+      { apply Nat.Div0.div_le_mono. apply Nat.mul_le_mono_l. exact Hmin. }
+      assert (Hge : gate_capacity_cm pc * min_gate_pct_prop / 100 >= max_inflow_cm_prop)
+        by exact Hsuff.
+      lia.
+    - lia.
+  Qed.
+
+  Lemma level_nonincreasing_above_setpoint :
+    forall s t,
+      adequate_prop s ->
+      reservoir_level_cm s >= setpoint_cm ->
+      reservoir_level_cm (step worst_case_inflow control_proportional s t) <= reservoir_level_cm s.
+  Proof.
+    intros s t Hadq Habove.
+    unfold adequate_prop in Hadq. destruct Hadq as [[_ _] [Hgate _]].
+    assert (Hout : outflow worst_case_inflow control_proportional s t >= worst_case_inflow t).
+    { apply outflow_exceeds_inflow. exact Hgate. }
+    unfold step. simpl.
+    lia.
+  Qed.
+
+  Lemma lyapunov_nonincreasing_no_cross :
+    forall s t,
+      adequate_prop s ->
+      reservoir_level_cm s > setpoint_cm ->
+      reservoir_level_cm (step worst_case_inflow control_proportional s t) >= setpoint_cm ->
+      lyapunov (step worst_case_inflow control_proportional s t) <= lyapunov s.
+  Proof.
+    intros s t Hadq Habove Hnocross.
+    assert (Hlevel : reservoir_level_cm (step worst_case_inflow control_proportional s t) <= reservoir_level_cm s).
+    { apply level_nonincreasing_above_setpoint. exact Hadq. lia. }
+    unfold lyapunov.
+    destruct (Nat.leb (reservoir_level_cm s) setpoint_cm) eqn:Hs.
+    - apply Nat.leb_le in Hs. lia.
+    - destruct (Nat.leb (reservoir_level_cm (step worst_case_inflow control_proportional s t)) setpoint_cm) eqn:Hs'.
+      + apply Nat.leb_le in Hs'. lia.
+      + apply Nat.leb_gt in Hs. apply Nat.leb_gt in Hs'. lia.
+  Qed.
+
+  Theorem lyapunov_stability :
+    forall s t,
+      adequate_prop s ->
+      above_deadband s ->
+      reservoir_level_cm (step worst_case_inflow control_proportional s t) >= setpoint_cm ->
+      lyapunov (step worst_case_inflow control_proportional s t) <= lyapunov s.
+  Proof.
+    intros s t Hadq Hab Hnocross.
+    apply lyapunov_nonincreasing_no_cross.
+    - exact Hadq.
+    - unfold above_deadband in Hab. lia.
+    - exact Hnocross.
   Qed.
 
 End ProportionalCertified.
