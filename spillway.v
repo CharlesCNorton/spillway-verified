@@ -14,6 +14,14 @@
 (*                                                                            *)
 (******************************************************************************)
 
+(** TODO:
+     - Integrate head-dependent discharge into all certified controller proofs
+     - Add storage curve V(h) consistency lemmas for area-based conversions
+     - Replace linear stage model with orifice/weir-based rating curve
+     - Extend actuator model with stiction, delay, and per-gate failures
+     - Add environmental minimum flow and turbine release constraints
+*)
+
 (** Milestones completed:
      - Reduce Z model hypothesis count
      - Validate backwater head_ratio_pct
