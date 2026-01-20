@@ -30,7 +30,7 @@
      - Create formal Hoover Dam instantiation
 *)
 
-From Coq Require Import Arith Lia List ZArith Program.
+From Coq Require Import Arith Lia List ZArith Program PeanoNat.
 Import ListNotations.
 
 Set Implicit Arguments.
@@ -56,12 +56,18 @@ Record PlantConfig
   forecast_error_pct : nat;
   gate_slew_pct : nat;
   max_stage_rise_cm : nat;
-  reservoir_area_cm2 : nat;
+  reservoir_area_min_cm2 : nat;
+  reservoir_area_max_cm2 : nat;
+  reservoir_area_curve_cm2 : nat -> nat;
+  design_head_cm : nat;
   timestep_s : nat;
   pc_max_reservoir_pos : max_reservoir_cm > 0;
   pc_max_downstream_pos : max_downstream_cm > 0;
   pc_gate_capacity_pos : gate_capacity_cm > 0;
-  pc_reservoir_area_pos : reservoir_area_cm2 > 0;
+  pc_reservoir_area_min_pos : reservoir_area_min_cm2 > 0;
+  pc_reservoir_area_curve_bounds :
+    forall h, reservoir_area_min_cm2 <= reservoir_area_curve_cm2 h <= reservoir_area_max_cm2;
+  pc_design_head_pos : design_head_cm > 0;
   pc_timestep_pos : timestep_s > 0
 }.
 
@@ -70,24 +76,20 @@ Coercion reservoir_level_cm : State >-> nat.
 
 (** Dimensional normalization.
 
-    IMPORTANT: This model uses a dimensionally consistent approach where:
-    - All inflow values (worst_case_inflow, inflow_forecast) are in LEVEL UNITS (cm)
-    - All capacity values (gate_capacity_cm) are in LEVEL UNITS (cm per timestep)
-    - The outflow function directly computes level changes without conversion
+    IMPORTANT: This model uses volumetric flow rates (cm^3/s) and converts them
+    into level changes (cm) using the plant-specific area curve A(h):
 
-    This means that before using the model, physical quantities must be converted:
-
-      level_change_cm = flow_cms * timestep_s / area_cm2
+      level_change_cm = flow_cms * timestep_s / area_cm2(h)
 
     Where:
       - flow_cms: volumetric flow rate in cubic centimeters per second
       - timestep_s: timestep duration in seconds
-      - area_cm2: reservoir surface area in square centimeters
+      - area_cm2(h): reservoir surface area at current level h
 
     For real-world application with SI units:
       1. Convert flows from m^3/s to cm^3/s: flow_cms = flow_m3s * 1e6
       2. Convert area from m^2 to cm^2: area_cm2 = area_m2 * 1e4
-      3. Apply: level_change_cm = flow_cms * timestep_s / area_cm2
+      3. Apply: level_change_cm = flow_cms * timestep_s / area_cm2(h)
 
     Example: For a 1000 m^2 reservoir with 0.5 m^3/s inflow over 60s timestep:
       - flow_cms = 0.5 * 1e6 = 500000 cm^3/s
@@ -858,10 +860,24 @@ Section WithPlantConfig.
 
   Variable pc : PlantConfig.
 
-  (** Convert volumetric flow (cm^3/s) to level change (cm) for this plant. *)
-  Definition to_level (flow_cms : nat)
+  (** Reservoir area curve at the current level. *)
+  Definition reservoir_area_at (level_cm : nat) : nat :=
+    reservoir_area_curve_cm2 pc level_cm.
+
+  (** Convert volumetric flow (cm^3/s) to level change (cm) at a given level. *)
+  Definition to_level_at (level_cm : nat) (flow_cms : nat)
     : nat
-    := flow_to_level flow_cms (timestep_s pc) (reservoir_area_cm2 pc).
+    := flow_to_level flow_cms (timestep_s pc) (reservoir_area_at level_cm).
+
+  (** Conservative conversions using area bounds. *)
+  Definition to_level_min (flow_cms : nat) : nat :=
+    flow_to_level flow_cms (timestep_s pc) (reservoir_area_min_cm2 pc).
+
+  Definition to_level_max (flow_cms : nat) : nat :=
+    flow_to_level flow_cms (timestep_s pc) (reservoir_area_max_cm2 pc).
+
+  (** Default conversion for worst-case bounds (min area). *)
+  Definition to_level (flow_cms : nat) : nat := to_level_min flow_cms.
 
   (** Forecast inflow series (cm^3/s) indexed by timestep.
       Values are in volumetric flow units and must be converted to level units. *)
@@ -886,11 +902,13 @@ Section WithPlantConfig.
     : Prop
     := safe s /\ gate_ok s.
 
-  (** Worst-case inflow as level change (cm) using fixed forecast error.
-      Converts from volumetric flow to level change and applies error margin. *)
-  Definition worst_case_inflow (t : nat)
-    : nat
-    := to_level (div_ceil (inflow_forecast_cms t * (100 + forecast_error_pct pc)) pos_100).
+  (** Worst-case inflow rate (cm^3/s) using fixed forecast error. *)
+  Definition worst_case_inflow (t : nat) : nat :=
+    div_ceil (inflow_forecast_cms t * (100 + forecast_error_pct pc)) pos_100.
+
+  (** Worst-case inflow as level change (cm) using conservative min area. *)
+  Definition worst_case_inflow_level (t : nat) : nat :=
+    to_level (worst_case_inflow t).
 
   (** Time-varying forecast error percentage.
 
@@ -911,10 +929,13 @@ Section WithPlantConfig.
   Hypothesis forecast_error_pct_t_bound
     : forall t, forecast_error_pct_t t <= 2 * forecast_error_pct pc.
 
-  (** Worst-case inflow as level change (cm) using per-timestep forecast error. *)
-  Definition worst_case_inflow_t (t : nat)
-    : nat
-    := to_level (div_ceil (inflow_forecast_cms t * (100 + forecast_error_pct_t t)) pos_100).
+  (** Worst-case inflow rate (cm^3/s) using per-timestep forecast error. *)
+  Definition worst_case_inflow_t (t : nat) : nat :=
+    div_ceil (inflow_forecast_cms t * (100 + forecast_error_pct_t t)) pos_100.
+
+  (** Worst-case inflow as level change (cm) using conservative min area. *)
+  Definition worst_case_inflow_level_t (t : nat) : nat :=
+    to_level (worst_case_inflow_t t).
 
   (** to_level is monotone: larger flows produce larger level changes. *)
   Lemma to_level_mono
@@ -927,14 +948,26 @@ Section WithPlantConfig.
     exact Hle.
   Qed.
 
+  (** to_level_at is monotone in flow for any fixed level. *)
+  Lemma to_level_at_mono
+    : forall level f1 f2, f1 <= f2 -> to_level_at level f1 <= to_level_at level f2.
+  Proof.
+    intros level f1 f2 Hle.
+    unfold to_level_at, flow_to_level.
+    apply Nat.Div0.div_le_mono.
+    apply Nat.mul_le_mono_r.
+    exact Hle.
+  Qed.
+
   (** Time-varying worst-case is bounded by worst-case with doubled error.
       Uses forecast_error_pct_t_bound to establish the relationship. *)
   Lemma worst_case_inflow_t_bound
     : forall t,
-      worst_case_inflow_t t <= to_level (div_ceil (inflow_forecast_cms t * (100 + 2 * forecast_error_pct pc)) pos_100).
+      worst_case_inflow_level_t t <=
+      to_level (div_ceil (inflow_forecast_cms t * (100 + 2 * forecast_error_pct pc)) pos_100).
   Proof.
     intro t.
-    unfold worst_case_inflow_t.
+    unfold worst_case_inflow_level_t, worst_case_inflow_t.
     apply to_level_mono.
     apply div_ceil_mono_n.
     pose proof (forecast_error_pct_t_bound t) as Hbound.
@@ -960,10 +993,10 @@ Section WithPlantConfig.
   Lemma worst_case_constant_eq :
     forall t,
       to_level (div_ceil (inflow_forecast_cms t * (100 + constant_error_pct t)) pos_100)
-      = worst_case_inflow t.
+      = worst_case_inflow_level t.
   Proof.
     intro t.
-    unfold constant_error_pct, worst_case_inflow.
+    unfold constant_error_pct, worst_case_inflow_level, worst_case_inflow.
     reflexivity.
   Qed.
 
@@ -1009,15 +1042,44 @@ Section WithPlantConfig.
     lia.
   Qed.
 
-  (** Available storage plus inflow from a provided inflow function. *)
-  Definition available_water (inflow : nat -> nat) (s : State) (t : nat)
-    : nat
-    := reservoir_level_cm s + inflow t.
+  (** Inflow converted to a level change using the area curve. *)
+  Definition inflow_level (inflow_cms : nat -> nat) (s : State) (t : nat) : nat :=
+    to_level_at (reservoir_level_cm s) (inflow_cms t).
 
-  (** Released discharge as level change (cm), limited by capacity and availability. *)
-  Definition outflow (inflow : nat -> nat) (ctrl : State -> nat -> nat) (s : State) (t : nat)
+  (** Worst-case inflow level change at the current state. *)
+  Definition worst_case_inflow_level_at (s : State) (t : nat) : nat :=
+    inflow_level worst_case_inflow s t.
+
+  (** Available storage plus inflow from a provided inflow function. *)
+  Definition available_water (inflow_cms : nat -> nat) (s : State) (t : nat)
     : nat
-    := Nat.min (gate_capacity_cm pc * ctrl s t / 100) (available_water inflow s t).
+    := reservoir_level_cm s + inflow_level inflow_cms s t.
+
+  (** Effective head for discharge (cm), based on current tailwater. *)
+  Definition head_cm (s : State) : nat :=
+    if Nat.leb (downstream_stage_cm s) (reservoir_level_cm s)
+    then reservoir_level_cm s - downstream_stage_cm s
+    else 0.
+
+  (** Head ratio (percent of design head), sqrt-scaled for orifice behavior. *)
+  Definition head_ratio_pct (s : State) : nat :=
+    let head := head_cm s in
+    let design := design_head_cm pc in
+    Nat.min 100 (Nat.sqrt (head * 10000 / design)).
+
+  (** Discharge capacity (cm^3/s) adjusted for head. *)
+  Definition discharge_capacity_cms (s : State) : nat :=
+    gate_capacity_cm pc * head_ratio_pct s / 100.
+
+  (** Outflow rate (cm^3/s) from gate opening and head. *)
+  Definition outflow_rate (ctrl : State -> nat -> nat) (s : State) (t : nat) : nat :=
+    discharge_capacity_cms s * ctrl s t / 100.
+
+  (** Released discharge as level change (cm), limited by availability. *)
+  Definition outflow (inflow_cms : nat -> nat) (ctrl : State -> nat -> nat) (s : State) (t : nat)
+    : nat
+    := Nat.min (to_level_at (reservoir_level_cm s) (outflow_rate ctrl s t))
+               (available_water inflow_cms s t).
 
   (** Outflow never exceeds available water (ensures no underflow in step). *)
   Lemma outflow_le_available
@@ -1029,13 +1091,13 @@ Section WithPlantConfig.
   Qed.
 
   (** One-step reservoir update under a provided inflow function.
-      All values are in level units (cm) after dimensional conversion. *)
-  Definition step (inflow : nat -> nat) (ctrl : State -> nat -> nat) (s : State) (t : nat)
+      Inflow/outflow are in cm^3/s and converted to level change via A(h). *)
+  Definition step (inflow_cms : nat -> nat) (ctrl : State -> nat -> nat) (s : State) (t : nat)
     : State
-    := let qin := inflow t in
-       let out := outflow inflow ctrl s t in
+    := let qin := inflow_level inflow_cms s t in
+       let out := outflow inflow_cms ctrl s t in
        let new_res := reservoir_level_cm s + qin - out in
-       let new_stage := stage_from_outflow out in
+       let new_stage := stage_from_outflow (outflow_rate ctrl s t) in
        {| reservoir_level_cm := new_res;
           downstream_stage_cm := new_stage;
           gate_open_pct := ctrl s t |}.
@@ -1264,18 +1326,17 @@ Section SingleGate.
   (** Controller-induced stage respects per-step ramp limit. *)
   Hypothesis control_ramp_limited
     : forall s t, safe s ->
-        stage_from_outflow (outflow inflow control s t)
+        stage_from_outflow (outflow_rate control s t)
           <= downstream_stage_cm s + max_stage_rise_cm pc.
 
   (** Plant stage response is below downstream ceiling. *)
   Hypothesis stage_bounded
     : forall out, stage_from_outflow out <= max_downstream_cm pc.
 
-  (** Mass balance: storage plus inflow stays under crest plus discharge.
-      Uses normalized units where values directly represent level changes. *)
+  (** Mass balance: storage plus inflow level change stays under crest plus discharge. *)
   Hypothesis reservoir_preserved
     : forall s t, safe s ->
-        reservoir_level_cm s + inflow t
+        reservoir_level_cm s + inflow_level inflow s t
           <= outflow inflow control s t + max_reservoir_cm pc.
 
 (** Utility lemma: if a <= b + c then a - b <= c. *)
@@ -1309,7 +1370,7 @@ Proof.
   destruct Hsafe as [Hres Hstage].
   unfold step.
   simpl.
-  set (qin := inflow t).
+  set (qin := inflow_level inflow s t).
   set (out := outflow inflow control s t).
   assert (Hres_bound : reservoir_level_cm s + qin <= out + max_reservoir_cm pc).
   { apply reservoir_preserved. split; assumption. }
@@ -1454,9 +1515,9 @@ Section ConcreteCertified.
   Hypothesis margin_le_reservoir
     : margin_cm <= max_reservoir_cm pc.
 
-  (** Worst-case inflow is within the chosen margin. *)
+  (** Worst-case inflow level change is within the chosen margin. *)
   Hypothesis inflow_below_margin
-    : forall t, worst_case_inflow t <= margin_cm.
+    : forall s t, safe s -> inflow_level worst_case_inflow s t <= margin_cm.
 
   (** Slew rate is positive and realistic. *)
   Hypothesis slew_pos
@@ -1467,26 +1528,16 @@ Section ConcreteCertified.
     : nat
     := div_ceil 100 slew_pos.
 
-  (** Maximum inflow over any single timestep. *)
+  (** Maximum inflow level change over any single timestep. *)
   Variable max_inflow_cm : nat.
 
-  (** max_inflow_cm bounds all worst-case inflows. *)
+  (** max_inflow_cm bounds all worst-case inflow level changes. *)
   Hypothesis max_inflow_bounds
-    : forall t, worst_case_inflow t <= max_inflow_cm.
+    : forall s t, safe s -> inflow_level worst_case_inflow s t <= max_inflow_cm.
 
-  (** Gate capacity sized to handle maximum inflow. *)
-  Hypothesis capacity_exceeds_max_inflow
-    : max_inflow_cm <= gate_capacity_cm pc.
-
-  (** Derived: Gate capacity can pass any worst-case inflow. *)
-  Lemma capacity_sufficient
-    : forall t, worst_case_inflow t <= gate_capacity_cm pc.
-  Proof.
-    intro t.
-    eapply Nat.le_trans.
-    - apply max_inflow_bounds.
-    - exact capacity_exceeds_max_inflow.
-  Qed.
+  (** At current head, discharge capacity covers worst-case inflow rate. *)
+  Hypothesis discharge_capacity_sufficient :
+    forall s t, safe s -> worst_case_inflow t <= discharge_capacity_cms s.
 
   (** Margin is large enough to absorb inflow during gate ramp-up time.
       This ensures safety even when starting from 0% gate opening. *)
@@ -1612,32 +1663,41 @@ Section ConcreteCertified.
       Otherwise, rely on margin for headroom below threshold. *)
   Lemma reservoir_preserved_concrete :
     forall s t, adequate s ->
-      reservoir_level_cm s + worst_case_inflow t <= outflow worst_case_inflow control_concrete s t + max_reservoir_cm pc.
+      reservoir_level_cm s + inflow_level worst_case_inflow s t
+      <= outflow worst_case_inflow control_concrete s t + max_reservoir_cm pc.
   Proof.
     intros s t Hadq.
     unfold adequate in Hadq.
-    destruct Hadq as [[Hres _] [Hok Hgate_adq]].
+    destruct Hadq as [[Hres Hstage] [Hok Hgate_adq]].
     destruct (Nat.leb threshold_cm (reservoir_level_cm s)) eqn:Hbranch.
     - (* Above threshold: gate is at 100% by adequate, so outflow = capacity >= inflow. *)
+      assert (Hbranch_eq := Hbranch).
       apply Nat.leb_le in Hbranch.
       assert (Hgate100 : gate_open_pct s = 100) by (apply Hgate_adq; exact Hbranch).
-      unfold outflow, available_water, control_concrete, threshold_cm.
-      assert (Hbranch_eq : Nat.leb (max_reservoir_cm pc - margin_cm) (reservoir_level_cm s) = true)
-        by (apply Nat.leb_le; exact Hbranch).
+      unfold outflow, outflow_rate, available_water, control_concrete.
       rewrite Hbranch_eq.
+      unfold threshold_cm.
       rewrite Hgate100.
       assert (Hctrl_100 : Nat.min 100 (100 + gate_slew_pct pc) = 100) by (apply Nat.min_l; lia).
       rewrite Hctrl_100.
-      assert (Hcap := capacity_sufficient t).
+      pose proof (@discharge_capacity_sufficient s t (conj Hres Hstage)) as Hcap.
       apply Nat.min_case_strong; intro Hcmp.
-      + assert (Hdiv : gate_capacity_cm pc * 100 / 100 = gate_capacity_cm pc)
+      + assert (Hdiv : discharge_capacity_cms s * 100 / 100 = discharge_capacity_cms s)
           by (apply Nat.div_mul; discriminate).
         rewrite Hdiv.
-        assert (Hstep1 : reservoir_level_cm s + worst_case_inflow t <= reservoir_level_cm s + gate_capacity_cm pc)
-          by (apply Nat.add_le_mono_l; exact Hcap).
-        assert (Hstep2 : reservoir_level_cm s + gate_capacity_cm pc <= max_reservoir_cm pc + gate_capacity_cm pc)
+        assert (Hinflow_le :
+                  inflow_level worst_case_inflow s t
+                  <= to_level_at (reservoir_level_cm s) (discharge_capacity_cms s)).
+        { unfold inflow_level. apply to_level_at_mono. exact Hcap. }
+        assert (Hstep1 :
+                  reservoir_level_cm s + inflow_level worst_case_inflow s t
+                  <= reservoir_level_cm s + to_level_at (reservoir_level_cm s) (discharge_capacity_cms s))
+          by (apply Nat.add_le_mono_l; exact Hinflow_le).
+        assert (Hstep2 :
+                  reservoir_level_cm s + to_level_at (reservoir_level_cm s) (discharge_capacity_cms s)
+                  <= max_reservoir_cm pc + to_level_at (reservoir_level_cm s) (discharge_capacity_cms s))
           by (apply Nat.add_le_mono_r; exact Hres).
-        lia.
+        eapply Nat.le_trans; [exact Hstep1 | exact Hstep2].
       + lia.
     - (* Below threshold: margin provides headroom. *)
       apply Nat.leb_gt in Hbranch.
@@ -1651,8 +1711,9 @@ Section ConcreteCertified.
         by (apply Nat.leb_gt; lia).
       rewrite Hbranch_eq.
       simpl.
-      assert (Hinflow := inflow_below_margin t).
-      assert (Hresv_le : reservoir_level_cm s + worst_case_inflow t <= max_reservoir_cm pc).
+      assert (Hinflow := inflow_below_margin s t (conj Hres Hstage)).
+      assert (Hresv_le :
+                reservoir_level_cm s + inflow_level worst_case_inflow s t <= max_reservoir_cm pc).
       { apply Nat.lt_le_incl.
         eapply Nat.le_lt_trans.
         - apply Nat.add_le_mono_l; exact Hinflow.
@@ -7384,8 +7445,8 @@ Section WitnessExamples.
 
   Definition witness_plant : PlantConfig.
   Proof.
-    refine (@mkPlantConfig 100 50 10 1 2 5 100 1 _ _ _ _ _).
-    all: abstract lia.
+    refine (@mkPlantConfig 100 50 10 1 2 5 100 100 (fun _ => 100) 50 1 _ _ _ _ _ _ _).
+    all: abstract (intros; lia).
   Defined.
 
   Definition witness_inflow (_ : nat) : nat := 8.
@@ -7502,10 +7563,13 @@ Section ConsistencyProof.
       10     (* forecast_error_pct *)
       50     (* gate_slew_pct *)
       200    (* max_stage_rise_cm *)
-      1000   (* reservoir_area_cm2 *)
+      1000   (* reservoir_area_min_cm2 *)
+      1000   (* reservoir_area_max_cm2 *)
+      (fun _ => 1000) (* reservoir_area_curve_cm2 *)
+      100    (* design_head_cm *)
       1      (* timestep_s *)
-      _ _ _ _ _).
-    all: abstract lia.
+      _ _ _ _ _ _ _).
+    all: abstract (intros; lia).
   Defined.
 
   (** Constant inflow forecast: 40000 cm³/s.
@@ -7712,7 +7776,10 @@ Section ParameterizedConsistency.
   Variable error_pct : nat.
   Variable slew : nat.
   Variable stage_rise : nat.
-  Variable area : nat.
+  Variable area_min : nat.
+  Variable area_max : nat.
+  Variable area_curve : nat -> nat.
+  Variable design_head : nat.
   Variable timestep : nat.
 
   (** Controller parameters. *)
@@ -7729,7 +7796,10 @@ Section ParameterizedConsistency.
   Hypothesis C1_max_res_pos : max_res > 0.
   Hypothesis C1_max_down_pos : max_down > 0.
   Hypothesis C1_capacity_pos : capacity > 0.
-  Hypothesis C1_area_pos : area > 0.
+  Hypothesis C1_area_min_pos : area_min > 0.
+  Hypothesis C1_area_curve_bounds :
+    forall h, area_min <= area_curve h <= area_max.
+  Hypothesis C1_design_head_pos : design_head > 0.
   Hypothesis C1_timestep_pos : timestep > 0.
 
   (** C2: Margin fits within reservoir. *)
@@ -7772,11 +7842,14 @@ Section ParameterizedConsistency.
   Definition parameterized_plant : PlantConfig.
   Proof.
     refine (@mkPlantConfig max_res max_down capacity error_pct slew
-                           stage_rise area timestep _ _ _ _ _).
+                           stage_rise area_min area_max area_curve design_head timestep
+                           _ _ _ _ _ _ _).
     - exact C1_max_res_pos.
     - exact C1_max_down_pos.
     - exact C1_capacity_pos.
-    - exact C1_area_pos.
+    - exact C1_area_min_pos.
+    - exact C1_area_curve_bounds.
+    - exact C1_design_head_pos.
     - exact C1_timestep_pos.
   Defined.
 
@@ -7885,8 +7958,8 @@ Section CounterexampleTests.
 
   Definition bad_plant_no_capacity : PlantConfig.
   Proof.
-    refine (@mkPlantConfig 100 50 1 1 100 50 100 1 _ _ _ _ _).
-    all: abstract lia.
+    refine (@mkPlantConfig 100 50 1 1 100 50 100 100 (fun _ => 100) 50 1 _ _ _ _ _ _ _).
+    all: abstract (intros; lia).
   Defined.
 
   Definition high_inflow (_ : nat) : nat := 10.
@@ -7945,8 +8018,8 @@ Section BoundaryTests.
 
   Definition boundary_plant : PlantConfig.
   Proof.
-    refine (@mkPlantConfig 100 50 10 0 100 50 100 1 _ _ _ _ _).
-    all: abstract lia.
+    refine (@mkPlantConfig 100 50 10 0 100 50 100 100 (fun _ => 100) 50 1 _ _ _ _ _ _ _).
+    all: abstract (intros; lia).
   Defined.
 
   Definition zero_inflow (_ : nat) : nat := 0.
@@ -8018,21 +8091,24 @@ End BoundaryTests.
          Typically the dam crest elevation minus spillway sill elevation.
        - max_downstream_cm: Maximum allowable downstream stage (cm).
          Based on channel capacity or regulatory limits.
-       - gate_capacity_cm: Maximum discharge through spillway gates.
-         Convert from m³/s to cm/timestep using flow_to_level.
+       - gate_capacity_cm: Maximum discharge through spillway gates at design head (cm^3/s).
+         Convert from m^3/s to cm^3/s using 1e6.
        - gate_slew_pct: Maximum gate movement per timestep (% of full travel).
          Typically 1-5% per minute for large radial gates.
        - forecast_error_pct: Expected forecast uncertainty (%).
          Typically 10-30% depending on forecast method and lead time.
        - max_stage_rise_cm: Maximum downstream stage rise per timestep (cm).
          Based on safe rate-of-change limits.
-       - reservoir_area_cm2: Reservoir surface area at spillway crest (cm²).
+       - reservoir_area_min_cm2: Minimum reservoir surface area (cm^2).
+       - reservoir_area_max_cm2: Maximum reservoir surface area (cm^2).
+       - reservoir_area_curve_cm2: Area curve A(h) over operating range.
+       - design_head_cm: Reference head used to scale discharge (cm).
        - timestep_s: Control timestep duration (seconds).
          Typically 60-300 seconds for real-time control.
 
     2. PERFORM UNIT CONVERSIONS:
        All flow values must be converted to level changes:
-         level_cm = flow_m3s * 1e6 * timestep_s / (area_m2 * 1e4)
+         level_cm = flow_m3s * 1e6 * timestep_s / (area_m2(h) * 1e4)
 
     3. VERIFY HYPOTHESES:
        Before using the certified theorems, verify that:
@@ -8519,8 +8595,8 @@ Section HistoricalTestHarness.
   (** Historical witness plant scaled for the event series. *)
   Definition hist_witness_plant : PlantConfig.
   Proof.
-    refine (@mkPlantConfig 500 500 500 1 5 10 100 1 _ _ _ _ _).
-    all: abstract lia.
+    refine (@mkPlantConfig 500 500 500 1 5 10 100 100 (fun _ => 100) 100 1 _ _ _ _ _ _ _).
+    all: abstract (intros; lia).
   Defined.
 
   (** Simple bounded stage function for the witness plant. *)
@@ -8669,14 +8745,17 @@ Section HooverDamInstantiation.
     refine (@mkPlantConfig
       2200     (* max_reservoir_cm: 22 m operating range, scaled down *)
       100      (* max_downstream_cm: 1 m max tailwater, scaled down *)
-      500      (* gate_capacity_cm: spillway capacity per timestep, scaled *)
+      500      (* gate_capacity_cm: spillway capacity at design head, scaled *)
       15       (* forecast_error_pct: 15% error bound *)
       5        (* gate_slew_pct: 5% per timestep *)
       10       (* max_stage_rise_cm: 10 cm max per timestep *)
-      1000     (* reservoir_area_cm2: scaled area *)
+      1000     (* reservoir_area_min_cm2: scaled area *)
+      1000     (* reservoir_area_max_cm2: scaled area *)
+      (fun _ => 1000) (* reservoir_area_curve_cm2: constant area *)
+      200      (* design_head_cm: scaled reference head *)
       60       (* timestep_s: 60 second timesteps *)
-      _ _ _ _ _).
-    all: abstract lia.
+      _ _ _ _ _ _ _).
+    all: abstract (intros; lia).
   Defined.
 
   (** Hoover Dam initial state: normal operating level. *)
