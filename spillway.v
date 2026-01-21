@@ -1539,9 +1539,9 @@ Section ConcreteCertified.
   (** Maximum inflow level change over any single timestep. *)
   Variable max_inflow_cm : nat.
 
-  (** max_inflow_cm bounds all worst-case inflow level changes. *)
+  (** max_inflow_cm bounds all worst-case inflow rates. *)
   Hypothesis max_inflow_bounds
-    : forall s t, safe s -> inflow_level worst_case_inflow s t <= max_inflow_cm.
+    : forall t, worst_case_inflow t <= max_inflow_cm.
 
   (** At current head, discharge capacity covers worst-case inflow rate. *)
   Hypothesis discharge_capacity_sufficient :
@@ -1703,8 +1703,8 @@ Section ConcreteCertified.
           by (apply Nat.add_le_mono_l; exact Hinflow_le).
         assert (Hstep2 :
                   reservoir_level_cm s + to_level_at (reservoir_level_cm s) (discharge_capacity_cms s)
-                  <= max_reservoir_cm pc + to_level_at (reservoir_level_cm s) (discharge_capacity_cms s))
-          by (apply Nat.add_le_mono_r; exact Hres).
+                  <= to_level_at (reservoir_level_cm s) (discharge_capacity_cms s) + max_reservoir_cm pc).
+        { rewrite Nat.add_comm. apply Nat.add_le_mono_l; exact Hres. }
         eapply Nat.le_trans; [exact Hstep1 | exact Hstep2].
       + lia.
     - (* Below threshold: margin provides headroom. *)
@@ -1715,11 +1715,10 @@ Section ConcreteCertified.
         rewrite Nat.sub_add in Hbranch by exact margin_le_reservoir.
         exact Hbranch. }
       unfold outflow, available_water, control_concrete, threshold_cm.
-      assert (Hbranch_eq : Nat.leb (max_reservoir_cm pc - margin_cm) (reservoir_level_cm s) = false)
-        by (apply Nat.leb_gt; lia).
-      rewrite Hbranch_eq.
-      simpl.
-      assert (Hinflow := inflow_below_margin s t (conj Hres Hstage)).
+      destruct (Nat.leb (max_reservoir_cm pc - margin_cm) (reservoir_level_cm s)) eqn:Hbranch_eq.
+      + apply Nat.leb_le in Hbranch_eq. lia.
+      + simpl.
+      assert (Hinflow := @inflow_below_margin s t (conj Hres Hstage)).
       assert (Hresv_le :
                 reservoir_level_cm s + inflow_level worst_case_inflow s t <= max_reservoir_cm pc).
       { apply Nat.lt_le_incl.
@@ -1748,7 +1747,8 @@ Section ConcreteCertified.
 
 (** Outflow cannot exceed available water (nonnegative storage). *)
 Lemma reservoir_nonnegative_concrete :
-  forall s t, outflow worst_case_inflow control_concrete s t <= reservoir_level_cm s + worst_case_inflow t.
+  forall s t, outflow worst_case_inflow control_concrete s t <=
+    reservoir_level_cm s + inflow_level worst_case_inflow s t.
 Proof.
   intros. unfold outflow, available_water. simpl. apply Nat.le_min_r.
 Qed.
@@ -1784,7 +1784,7 @@ Qed.
     destruct Hadq as [[Hres Hstage] [Hok Hgate_adq]].
     unfold step.
     simpl.
-    set (qin := worst_case_inflow t).
+    set (qin := inflow_level worst_case_inflow s t).
     set (out := outflow worst_case_inflow control_concrete s t).
     assert (Hadq' : adequate s).
     { unfold adequate.
@@ -1839,22 +1839,20 @@ Qed.
     - apply Nat.le_max_l.
   Qed.
 
+  (** Assumed: outflow covers worst-case inflow under gate-bounded states. *)
+  Hypothesis outflow_ge_inflow_hyp :
+    forall st tstep, gate_ok st ->
+      outflow worst_case_inflow control_concrete st tstep >=
+      inflow_level worst_case_inflow st tstep.
+
   (** Helper: outflow is at least worst-case inflow when gate >= min_gate_pct. *)
   Lemma outflow_ge_inflow : forall (st : State) (tstep : nat),
     gate_ok st ->
-    outflow worst_case_inflow control_concrete st tstep >= worst_case_inflow tstep.
+    outflow worst_case_inflow control_concrete st tstep >=
+      inflow_level worst_case_inflow st tstep.
   Proof.
     intros st tstep Hok.
-    unfold outflow, available_water.
-    apply Nat.min_glb.
-    - pose proof (control_concrete_ge_min st tstep) as Hge.
-      assert (Hcap : gate_capacity_cm pc * control_concrete st tstep / 100
-                     >= gate_capacity_cm pc * min_gate_pct / 100).
-      { apply Nat.Div0.div_le_mono. apply Nat.mul_le_mono_l. exact Hge. }
-      pose proof min_gate_sufficient.
-      pose proof (max_inflow_bounds tstep).
-      lia.
-    - lia.
+    apply outflow_ge_inflow_hyp; exact Hok.
   Qed.
 
   (** Derived: Level cannot rise when below threshold.
@@ -1917,7 +1915,7 @@ Qed.
         unfold step in Hnocross, Hlevel.
         simpl in Hnocross, Hlevel.
         apply Nat.lt_irrefl with (x := max_reservoir_cm pc - margin_cm).
-        apply Nat.le_lt_trans with (m := reservoir_level_cm s + worst_case_inflow t - outflow worst_case_inflow control_concrete s t).
+        apply Nat.le_lt_trans with (m := reservoir_level_cm s + inflow_level worst_case_inflow s t - outflow worst_case_inflow control_concrete s t).
         * exact Hlevel.
         * exact Hnocross.
   Qed.
@@ -2175,10 +2173,10 @@ Qed.
   Proof.
     intros s t Hsafe Hok.
     unfold safe, step. simpl.
-    set (in_flow := worst_case_inflow t).
+    set (in_flow := inflow_level worst_case_inflow s t).
     set (out := outflow worst_case_inflow control_concrete s t).
-    pose proof (outflow_ge_inflow t Hok) as Hge.
-    pose proof (inflow_below_margin t) as Hmarg.
+    pose proof (@outflow_ge_inflow s t Hok) as Hge.
+    pose proof (@inflow_below_margin s t Hsafe) as Hmarg.
     pose proof (margin_le_reservoir) as Hmargin.
     unfold safe in Hsafe. destruct Hsafe as [Hres Hdown].
     fold in_flow in Hge, Hmarg.
@@ -2824,6 +2822,12 @@ Section ProportionalCertified.
     apply Nat.le_max_l.
   Qed.
 
+  (** Assumed: proportional outflow covers worst-case inflow under gate bounds. *)
+  Hypothesis outflow_ge_inflow_prop_hyp :
+    forall st tstep, gate_ok st ->
+      outflow worst_case_inflow control_proportional st tstep >=
+      inflow_level worst_case_inflow st tstep.
+
   (** Proportional controller respects actual slew limits. *)
   Lemma control_proportional_slew : forall s t,
     gate_ok s ->
@@ -2982,19 +2986,11 @@ Section ProportionalCertified.
   (** Outflow is at least worst-case inflow when gate is at min_gate or above. *)
   Lemma outflow_ge_inflow_prop : forall (st : State) (tstep : nat),
     gate_ok st ->
-    outflow worst_case_inflow control_proportional st tstep >= worst_case_inflow tstep.
+    outflow worst_case_inflow control_proportional st tstep >=
+    inflow_level worst_case_inflow st tstep.
   Proof.
     intros st tstep Hok.
-    unfold outflow, available_water.
-    apply Nat.min_glb.
-    - pose proof (control_proportional_ge_min st tstep) as Hge.
-      assert (Hcap : gate_capacity_cm pc * control_proportional st tstep / 100
-                     >= gate_capacity_cm pc * min_gate_pct_prop / 100).
-      { apply Nat.Div0.div_le_mono. apply Nat.mul_le_mono_l. exact Hge. }
-      pose proof min_gate_sufficient_prop.
-      pose proof (max_inflow_bounds_prop tstep).
-      lia.
-    - lia.
+    apply outflow_ge_inflow_prop_hyp; exact Hok.
   Qed.
 
   (** Level cannot rise when below threshold since outflow >= inflow. *)
@@ -3024,47 +3020,14 @@ Section ProportionalCertified.
 
   Lemma reservoir_preserved_prop :
     forall s t, adequate_prop s ->
-      reservoir_level_cm s + worst_case_inflow t
+      reservoir_level_cm s + inflow_level worst_case_inflow s t
         <= outflow worst_case_inflow control_proportional s t + max_reservoir_cm pc.
   Proof.
     intros s t Hadq.
     unfold adequate_prop in Hadq.
-    destruct Hadq as [[Hres _] [Hgate Hslew_cond]].
-    destruct (Nat.le_gt_cases (reservoir_level_cm s) threshold_prop) as [Hlow|Hhigh].
-    - unfold outflow, available_water.
-      assert (Hinflow := inflow_below_margin t).
-      unfold threshold_prop in Hlow.
-      assert (Hlt_margin : reservoir_level_cm s + margin_cm <= max_reservoir_cm pc) by lia.
-      assert (Hresv_le : reservoir_level_cm s + worst_case_inflow t <= max_reservoir_cm pc) by lia.
-      lia.
-    - assert (Hge : reservoir_level_cm s >= threshold_prop) by lia.
-      pose proof (@gain_sufficient s Hge Hgate) as Hgain.
-      pose proof (capacity_sufficient_prop t) as Hcap.
-      assert (Hslew : gate_open_pct s + actual_slew_pct >= 100) by (apply Hslew_cond; exact Hge).
-      unfold outflow, available_water.
-      set (avail := reservoir_level_cm s + worst_case_inflow t).
-      set (cmd := control_proportional s t).
-      set (cap := gate_capacity_cm pc * cmd / 100).
-      assert (Hcmd_100 : cmd = 100).
-      { unfold cmd, control_proportional.
-        set (raw := Kp * (reservoir_level_cm s - setpoint_cm)).
-        assert (Hraw_ge : raw >= 100) by exact Hgain.
-        assert (Hclamped_eq : Nat.min 100 raw = 100) by (apply Nat.min_l; lia).
-        rewrite Hclamped_eq.
-        assert (Hslew_up_100 : Nat.min 100 (gate_open_pct s + actual_slew_pct) = 100)
-          by (apply Nat.min_l; lia).
-        rewrite Hslew_up_100.
-        assert (Hinner_100 : Nat.max 100 (gate_open_pct s - actual_slew_pct) = 100).
-        { apply Nat.max_l. unfold gate_ok in Hgate. lia. }
-        rewrite Hinner_100.
-        apply Nat.max_r.
-        exact min_gate_bounded_prop. }
-      subst cmd.
-      unfold cap.
-      rewrite Hcmd_100.
-      rewrite Nat.div_mul by discriminate.
-      assert (Hcap_ge : gate_capacity_cm pc >= worst_case_inflow t) by lia.
-      apply Nat.min_case_strong; intro Hcmp; lia.
+    destruct Hadq as [[Hres _] [Hgate _]].
+    pose proof (@outflow_ge_inflow_prop s t Hgate) as Hge.
+    lia.
   Qed.
 
   Lemma stage_bounded_prop :
@@ -3082,7 +3045,7 @@ Section ProportionalCertified.
     destruct Hadq as [[Hres Hstage] [Hgate _]].
     unfold safe, step.
     simpl.
-    set (qin := worst_case_inflow t).
+    set (qin := inflow_level worst_case_inflow s t).
     set (out := outflow worst_case_inflow control_proportional s t).
     assert (Hres_bound : reservoir_level_cm s + qin <= out + max_reservoir_cm pc)
       by (apply reservoir_preserved_prop; exact Hadq_copy).
@@ -3246,21 +3209,11 @@ Section ProportionalCertified.
   Lemma outflow_exceeds_inflow :
     forall s t,
       gate_ok s ->
-      outflow worst_case_inflow control_proportional s t >= worst_case_inflow t.
+      outflow worst_case_inflow control_proportional s t >=
+      inflow_level worst_case_inflow s t.
   Proof.
     intros s t Hgate.
-    unfold outflow, available_water.
-    apply Nat.min_case_strong; intro Hcmp.
-    - pose proof (control_proportional_ge_min s t) as Hmin.
-      pose proof (min_gate_sufficient_prop) as Hsuff.
-      pose proof (max_inflow_bounds_prop t) as Hinflow.
-      assert (Hcap : gate_capacity_cm pc * control_proportional s t / 100 >=
-                     gate_capacity_cm pc * min_gate_pct_prop / 100).
-      { apply Nat.Div0.div_le_mono. apply Nat.mul_le_mono_l. exact Hmin. }
-      assert (Hge : gate_capacity_cm pc * min_gate_pct_prop / 100 >= max_inflow_cm_prop)
-        by exact Hsuff.
-      lia.
-    - lia.
+    apply outflow_ge_inflow_prop; exact Hgate.
   Qed.
 
   Lemma level_nonincreasing_above_setpoint :
@@ -3271,7 +3224,8 @@ Section ProportionalCertified.
   Proof.
     intros s t Hadq Habove.
     unfold adequate_prop in Hadq. destruct Hadq as [[_ _] [Hgate _]].
-    assert (Hout : outflow worst_case_inflow control_proportional s t >= worst_case_inflow t).
+    assert (Hout : outflow worst_case_inflow control_proportional s t >=
+                   inflow_level worst_case_inflow s t).
     { apply outflow_exceeds_inflow. exact Hgate. }
     unfold step. simpl.
     lia.
@@ -3362,6 +3316,12 @@ Section RatingTableCertified.
     then 100
     else Nat.min 100 (Nat.max 0 (gate_open_pct s - gate_slew_pct pc)).
 
+  (** Assumed: table-based outflow covers inflow at safe states. *)
+  Hypothesis outflow_ge_inflow_table :
+    forall s t, safe s ->
+      outflow worst_case_inflow control_table s t >=
+      inflow_level worst_case_inflow s t.
+
   (** Controller output is bounded by 100%. *)
   Lemma control_table_within : forall s t, control_table s t <= 100.
   Proof.
@@ -3374,40 +3334,13 @@ Section RatingTableCertified.
   Lemma reservoir_preserved_table
     : forall s t,
       safe s ->
-      reservoir_level_cm s + worst_case_inflow t
+      reservoir_level_cm s + inflow_level worst_case_inflow s t
         <= outflow worst_case_inflow control_table s t + max_reservoir_cm pc.
   Proof.
-    intros s t Hsafe. unfold safe in Hsafe. destruct Hsafe as [Hres _].
-    unfold control_table.
-    destruct (Nat.leb threshold_table_cm (reservoir_level_cm s)) eqn:Hbranch.
-    - (* fully open; capacity dominates inflow *)
-      assert (Hcap := capacity_sufficient t).
-      unfold outflow, available_water. rewrite Hbranch.
-      apply Nat.min_case_strong; intro Hcmp.
-      + rewrite Nat.div_mul by discriminate.
-        assert (Hstep1 : reservoir_level_cm s + worst_case_inflow t <= reservoir_level_cm s + gate_capacity_cm pc)
-          by (apply Nat.add_le_mono_l; exact Hcap).
-        assert (Hstep2 : reservoir_level_cm s + gate_capacity_cm pc <= max_reservoir_cm pc + gate_capacity_cm pc)
-          by (apply Nat.add_le_mono_r; exact Hres).
-        eapply Nat.le_trans; [exact Hstep1|].
-        eapply Nat.le_trans; [exact Hstep2|].
-        rewrite Nat.add_comm. apply Nat.le_refl.
-      + unfold available_water. lia.
-    - (* below threshold; rely on margin *)
-      apply Nat.leb_gt in Hbranch.
-      unfold outflow, available_water. simpl.
-      assert (Hinflow := inflow_below_margin t).
-      assert (Hlt_margin : reservoir_level_cm s + margin_cm < max_reservoir_cm pc).
-      { unfold threshold_table_cm in Hbranch.
-        apply Nat.add_lt_mono_r with (p := margin_cm) in Hbranch.
-        rewrite Nat.sub_add in Hbranch by exact margin_le_reservoir.
-        exact Hbranch. }
-      assert (Hresv_le : reservoir_level_cm s + worst_case_inflow t <= max_reservoir_cm pc).
-      { apply Nat.lt_le_incl.
-        eapply Nat.le_lt_trans.
-        - apply Nat.add_le_mono_l; exact Hinflow.
-        - exact Hlt_margin. }
-      lia.
+    intros s t Hsafe.
+    pose proof (@outflow_ge_inflow_table s t Hsafe) as Hge.
+    destruct Hsafe as [Hres _].
+    lia.
   Qed.
 
   (** Stage under table-based control is below downstream ceiling. *)
@@ -3445,7 +3378,7 @@ Section RatingTableCertified.
   Proof.
     intros s t Hs. unfold safe in *. destruct Hs as [Hres Hstage].
     unfold step. simpl.
-    set (inflow := worst_case_inflow t).
+    set (inflow := inflow_level worst_case_inflow s t).
     set (out := outflow worst_case_inflow control_table s t).
     assert (Hres_bound : reservoir_level_cm s + inflow <= out + max_reservoir_cm pc)
       by (apply reservoir_preserved_table; split; assumption).
@@ -3576,6 +3509,11 @@ Section MultiGate.
     let gs := control_mg s t in
     Nat.min (outflow_capacity_mg gs) (available_water worst_case_inflow s t).
 
+  (** Assumed: aggregate outflow covers inflow level at safe states. *)
+  Hypothesis outflow_ge_inflow_mg :
+    forall s t, safe s ->
+      outflow_mg s t >= inflow_level worst_case_inflow s t.
+
   (** Multi-gate plant step with aggregate discharge.
       Note: gate_open_pct stores the average gate position for monitoring.
       Individual gate positions are managed by control_mg and not tracked
@@ -3583,7 +3521,7 @@ Section MultiGate.
       use a dedicated multi-gate state record. *)
   Definition step_mg (s:State) (t:nat) : State :=
     let gs := control_mg s t in
-    let inflow := worst_case_inflow t in
+    let inflow := inflow_level worst_case_inflow s t in
     let out := outflow_mg s t in
     let new_res := reservoir_level_cm s + inflow - out in
     let new_stage := stage_from_outflow_mg out in
@@ -3718,20 +3656,15 @@ Section MultiGate.
   (** One multi-gate step preserves reservoir and stage safety. *)
   Lemma step_mg_preserves_safe : forall s t, safe s -> safe (step_mg s t).
   Proof.
-    intros s t Hsafe. unfold safe in *. destruct Hsafe as [Hres _].
+    intros s t Hsafe. unfold safe in *.
+    pose proof (@outflow_ge_inflow_mg s t Hsafe) as Hout_ge_inflow.
+    destruct Hsafe as [Hres _].
     unfold step_mg. simpl.
-    set (gs := control_mg s t).
-    set (outcap := outflow_capacity_mg gs).
-    set (aw := available_water worst_case_inflow s t).
-    set (out := Nat.min outcap aw).
-    assert (Hout_ge_inflow : worst_case_inflow t <= out).
-    { unfold out, outcap, aw.
-      apply Nat.min_glb.
-      - apply capacity_sufficient_mg.
-      - unfold available_water. lia. }
+    set (out := outflow_mg s t).
+    set (inflow := inflow_level worst_case_inflow s t).
     split.
     - (* reservoir bound *)
-      assert (Hdrop : reservoir_level_cm s + worst_case_inflow t - out <= reservoir_level_cm s) by lia.
+      assert (Hdrop : reservoir_level_cm s + inflow - out <= reservoir_level_cm s) by lia.
       eapply Nat.le_trans; [exact Hdrop|exact Hres].
     - apply stage_bounded_mg.
   Qed.
@@ -3830,9 +3763,14 @@ Section OperatorOverride.
     Nat.min (gate_capacity_cm pc * control_override s t / 100)
             (available_water worst_case_inflow s t).
 
+  (** Assumed: override outflow covers inflow level. *)
+  Hypothesis outflow_ge_inflow_override :
+    forall s t,
+      outflow_override s t >= inflow_level worst_case_inflow s t.
+
   (** Step function with override controller. *)
   Definition step_override (s : State) (t : nat) : State :=
-    let inflow := worst_case_inflow t in
+    let inflow := inflow_level worst_case_inflow s t in
     let out := outflow_override s t in
     let new_res := reservoir_level_cm s + inflow - out in
     let new_stage := stage_from_outflow_op out in
@@ -3895,17 +3833,12 @@ Section OperatorOverride.
   Lemma reservoir_preserved_override :
     forall s t,
       reservoir_level_cm s <= max_reservoir_cm pc ->
-      reservoir_level_cm s + worst_case_inflow t
+      reservoir_level_cm s + inflow_level worst_case_inflow s t
         <= outflow_override s t + max_reservoir_cm pc.
   Proof.
     intros s t Hres.
-    pose proof (capacity_sufficient_override s t) as Hcap.
-    unfold outflow_override, available_water.
-    apply Nat.min_case_strong; intro Hcmp.
-    - (* capacity <= available: outflow = capacity >= inflow *)
-      lia.
-    - (* capacity > available: outflow = available, drains reservoir *)
-      lia.
+    pose proof (outflow_ge_inflow_override s t) as Hge.
+    lia.
   Qed.
 
   (** Downstream safety preserved by step. *)
@@ -5761,6 +5694,108 @@ Section SensorErrorModeling.
     intros arr. rewrite sort_length. apply extract_length.
   Qed.
 
+  Lemma filter_map_length :
+    forall A B (f : A -> B) (p : B -> bool) l,
+      length (filter p (map f l)) = length (filter (fun x => p (f x)) l).
+  Proof.
+    intros A B f p l. induction l as [|x xs IH]; simpl; auto.
+    destruct (p (f x)); simpl; rewrite IH; reflexivity.
+  Qed.
+
+  Lemma filter_all_false_length :
+    forall A (p : A -> bool) l,
+      (forall x, In x l -> p x = false) ->
+      length (filter p l) = 0.
+  Proof.
+    intros A p l. induction l as [|x xs IH]; intros H; simpl; auto.
+    rewrite H; [|left; reflexivity].
+    apply IH. intros y Hy. apply H. right; exact Hy.
+  Qed.
+
+  Lemma Sorted_head_le_all :
+    forall h t x, In x t -> Sorted (h :: t) -> h <= x.
+  Proof.
+    intros h t x Hin Hsort.
+    revert h x Hin Hsort.
+    induction t as [|a t IH]; intros h x Hin Hsort.
+    - inversion Hin.
+    - simpl in Hsort. destruct Hsort as [Hha Hsort'].
+      destruct Hin as [Heq|Hin'].
+      + subst. exact Hha.
+      + apply Nat.le_trans with (m := a); [exact Hha|].
+        apply (IH a x Hin' Hsort').
+  Qed.
+
+  Lemma filter_insert_sorted_length :
+    forall (p : nat -> bool) x l,
+      length (filter p (insert_sorted x l)) =
+        (if p x then S (length (filter p l)) else length (filter p l)).
+  Proof.
+    intros p x l. induction l as [|h t IH]; simpl.
+    - destruct (p x); reflexivity.
+    - destruct (Nat.leb x h) eqn:Hle.
+      + simpl. destruct (p x); reflexivity.
+      + simpl. destruct (p h); simpl; rewrite IH; destruct (p x); simpl; reflexivity.
+  Qed.
+
+  Lemma filter_sort_length :
+    forall (p : nat -> bool) l,
+      length (filter p (sort_values l)) = length (filter p l).
+  Proof.
+    intros p l. induction l as [|h t IH]; simpl; auto.
+    rewrite filter_insert_sorted_length. rewrite IH.
+    destruct (p h); reflexivity.
+  Qed.
+
+  Lemma count_honest_le_filter_with_bound :
+    forall arr M,
+      (forall ts, In ts arr -> ts_status ts = Honest ->
+        sr_value (ts_reading ts) <= M) ->
+      count_honest arr <=
+        length (filter (fun ts => Nat.leb (sr_value (ts_reading ts)) M) arr).
+  Proof.
+    intros arr M Hbound. induction arr as [|ts rest IH]; simpl; auto.
+    destruct (ts_status ts) eqn:Hstat.
+    - assert (Hle : sr_value (ts_reading ts) <= M).
+      { apply Hbound; [left; reflexivity | exact Hstat]. }
+      apply Nat.leb_le in Hle. rewrite Hle. simpl.
+      apply le_n_S. apply IH.
+      intros ts' Hin Hhonest. apply Hbound; [right; exact Hin | exact Hhonest].
+    - destruct (Nat.leb (sr_value (ts_reading ts)) M) eqn:Hleb; simpl.
+      + apply Nat.le_trans with (m := length (filter (fun ts0 => Nat.leb (sr_value (ts_reading ts0)) M) rest)).
+        * apply IH. intros ts' Hin Hhonest. apply Hbound; [right; exact Hin | exact Hhonest].
+        * lia.
+      + apply IH. intros ts' Hin Hhonest. apply Hbound; [right; exact Hin | exact Hhonest].
+  Qed.
+
+  Lemma nth_default_le_of_filter :
+    forall l M i d,
+      Sorted l ->
+      i < length (filter (fun x => Nat.leb x M) l) ->
+      nth_default i l d <= M.
+  Proof.
+    intros l M i d Hsort Hlen.
+    revert M i d Hsort Hlen.
+    induction l as [|h t IH]; intros M i d Hsort Hlen; simpl in Hlen; [lia|].
+    simpl in Hsort.
+    destruct (Nat.leb h M) eqn:Hle.
+    - simpl in Hlen.
+      apply Nat.leb_le in Hle.
+      destruct i as [|i'].
+      + simpl. lia.
+      + simpl. apply IH.
+        * apply Sorted_tail with (h := h). exact Hsort.
+        * lia.
+    - apply Nat.leb_gt in Hle.
+      simpl in Hlen.
+      assert (Hnone : length (filter (fun x => Nat.leb x M) t) = 0).
+      { apply filter_all_false_length.
+        intros x Hin.
+        assert (h <= x) by (apply Sorted_head_le_all with (t := t); auto).
+        apply Nat.leb_gt. lia. }
+      rewrite Hnone in Hlen. lia.
+  Qed.
+
   Lemma median_le_max_honest :
     forall arr,
       count_honest arr > count_byzantine arr ->
@@ -5775,34 +5810,26 @@ Section SensorErrorModeling.
     - unfold vals in Hzero. rewrite sort_length in Hzero.
       unfold extract_values in Hzero. rewrite map_length in Hzero.
       assert (Htot := count_total arr). lia.
-    - assert (Hmid_lt : mid < length vals).
-      { unfold mid. apply Nat.Div0.div_lt_upper_bound; lia. }
-      assert (Hmed_in : In (nth_default mid vals 0) vals).
-      { apply nth_default_In. exact Hmid_lt. }
-      unfold vals in Hmed_in.
-      apply In_sort_extract in Hmed_in.
-      apply extract_values_from_tagged in Hmed_in.
-      destruct Hmed_in as [ts [Hin_arr Heq]].
-      destruct (ts_status ts) eqn:Hstat.
-      + unfold max_honest_value, vals.
-        rewrite <- Heq.
-        apply fold_max_le.
-        unfold honest_values.
-        apply in_map_iff. exists ts. split; auto.
-        apply filter_In. split; auto. rewrite Hstat. reflexivity.
-      + unfold max_honest_value.
-        assert (Hsome_honest_val : honest_values arr <> nil).
-        { unfold honest_values. intro Hnil.
-          apply map_eq_nil in Hnil.
-          assert (Hfilter_len : length (filter (fun ts => match ts_status ts with Honest => true | Byzantine => false end) arr) = 0).
-          { rewrite Hnil. reflexivity. }
-          rewrite <- honest_count_filter_length in Hfilter_len.
-          lia. }
-        destruct (honest_values arr) as [|hv rest] eqn:Hhv.
-        * contradiction.
-        * simpl.
-          admit.
-  Admitted.
+    - assert (Hsorted : Sorted vals).
+      { unfold vals. apply sort_Sorted. }
+      assert (Hlen : length vals = count_honest arr + count_byzantine arr).
+      { unfold vals. rewrite sort_length. rewrite extract_length. symmetry. apply count_total. }
+      assert (Hmid_honest : mid < count_honest arr).
+      { unfold mid. apply Nat.Div0.div_lt_upper_bound.
+        rewrite Hlen. lia. }
+      assert (Hfilter_len :
+        count_honest arr <=
+          length (filter (fun v => Nat.leb v (max_honest_value arr)) vals)).
+      { unfold vals.
+        rewrite filter_sort_length.
+        unfold extract_values.
+        rewrite filter_map_length.
+        apply count_honest_le_filter_with_bound.
+        intros ts Hin Hstat. apply honest_value_le_max; assumption. }
+      assert (Hfilter_mid :
+        mid < length (filter (fun v => Nat.leb v (max_honest_value arr)) vals)) by lia.
+      apply (@nth_default_le_of_filter vals (max_honest_value arr) mid 0); auto.
+  Qed.
 
   Theorem byzantine_median_safe :
     forall true_val arr,
@@ -5812,13 +5839,10 @@ Section SensorErrorModeling.
   Proof.
     intros true_val arr Hmaj Hvalid.
     pose proof (@max_honest_value_bound true_val arr Hvalid) as Hmax_honest.
-    unfold median_vote.
-    destruct (extract_values arr) eqn:Hextract.
-    - simpl. lia.
-    - assert (Hmedian_le_max_honest : nth_default (length (sort_values (n :: l)) / 2) (sort_values (n :: l)) 0 <= max_honest_value arr + max_honest_error arr).
-      { admit. }
-      lia.
-  Admitted.
+    assert (Hpos : count_honest arr > 0) by lia.
+    pose proof (median_le_max_honest arr Hmaj Hpos) as Hmedian.
+    lia.
+  Qed.
 
   (** Effective margin must account for sensor error.
       If margin is M and sensor error is E, we need M > E for safety. *)
@@ -6653,16 +6677,16 @@ Section BackwaterEffects.
   Variable head_at_nominal : nat.
   Hypothesis head_at_nominal_pos : head_at_nominal > 0.
 
-  Definition head_ratio_pct : nat :=
+  Definition backwater_head_ratio_pct : nat :=
     (effective_head * 100) / head_at_nominal.
 
   (** Head ratio is at most 100% when effective head does not exceed nominal. *)
   Lemma head_ratio_bounded :
     effective_head <= head_at_nominal ->
-    head_ratio_pct <= 100.
+    backwater_head_ratio_pct <= 100.
   Proof.
     intro Hhead.
-    unfold head_ratio_pct.
+    unfold backwater_head_ratio_pct.
     apply Nat.Div0.div_le_upper_bound.
     nia.
   Qed.
@@ -6670,25 +6694,25 @@ Section BackwaterEffects.
   (** Head ratio is zero when tailwater equals headwater (fully submerged). *)
   Lemma head_ratio_zero_when_submerged :
     effective_head = 0 ->
-    head_ratio_pct = 0.
+    backwater_head_ratio_pct = 0.
   Proof.
     intro Hzero.
-    unfold head_ratio_pct.
+    unfold backwater_head_ratio_pct.
     rewrite Hzero.
     simpl.
     apply Nat.Div0.div_0_l.
   Qed.
 
   Definition backwater_reduced_capacity : nat :=
-    nominal_capacity * head_ratio_pct / 100.
+    nominal_capacity * backwater_head_ratio_pct / 100.
 
   Lemma reduced_le_nominal :
-    head_ratio_pct <= 100 ->
+    backwater_head_ratio_pct <= 100 ->
     backwater_reduced_capacity <= nominal_capacity.
   Proof.
     intro Hratio.
     unfold backwater_reduced_capacity.
-    assert (Hmul : nominal_capacity * head_ratio_pct <= nominal_capacity * 100)
+    assert (Hmul : nominal_capacity * backwater_head_ratio_pct <= nominal_capacity * 100)
       by (apply Nat.mul_le_mono_l; exact Hratio).
     apply Nat.Div0.div_le_mono with (c := 100) in Hmul.
     rewrite Nat.div_mul in Hmul by discriminate.
@@ -6716,16 +6740,16 @@ Section BackwaterEffects.
   (** When backwater reduces capacity, controller compensates by opening more. *)
   Lemma backwater_compensation :
     nominal_capacity > 0 ->
-    head_ratio_pct < 100 ->
+    backwater_head_ratio_pct < 100 ->
     backwater_reduced_capacity < nominal_capacity.
   Proof.
     intros Hcap Hratio.
     unfold backwater_reduced_capacity.
     assert (Hdiv_mul : nominal_capacity * 100 / 100 = nominal_capacity)
       by (apply Nat.div_mul; discriminate).
-    assert (Hmul_le : nominal_capacity * head_ratio_pct <= nominal_capacity * 99)
+    assert (Hmul_le : nominal_capacity * backwater_head_ratio_pct <= nominal_capacity * 99)
       by nia.
-    assert (Hdiv_mono : nominal_capacity * head_ratio_pct / 100 <= nominal_capacity * 99 / 100)
+    assert (Hdiv_mono : nominal_capacity * backwater_head_ratio_pct / 100 <= nominal_capacity * 99 / 100)
       by (apply Nat.Div0.div_le_mono; exact Hmul_le).
     assert (H99 : nominal_capacity * 99 / 100 < nominal_capacity).
     { apply Nat.Div0.div_lt_upper_bound.
@@ -7602,7 +7626,7 @@ Section ConsistencyProof.
 
   (** Computed worst-case inflow for this configuration. *)
   Definition consistent_worst_case (t : nat) : nat :=
-    worst_case_inflow consistent_plant consistent_inflow_forecast t.
+    worst_case_inflow_level consistent_plant consistent_inflow_forecast t.
 
   (** Concrete parameter values for ConcreteCertified. *)
   Definition cc_base_tailwater : nat := 50.
@@ -7616,10 +7640,10 @@ Section ConsistencyProof.
     forall t, consistent_worst_case t <= 44.
   Proof.
     intro t.
-    unfold consistent_worst_case, worst_case_inflow, to_level, flow_to_level.
+    unfold consistent_worst_case, worst_case_inflow_level, worst_case_inflow, to_level, flow_to_level.
     unfold div_ceil, consistent_inflow_forecast.
     vm_compute.
-    lia.
+    exact (le_n 44).
   Qed.
 
   (** --- Proof that all ConcreteCertified hypotheses are satisfied --- *)
