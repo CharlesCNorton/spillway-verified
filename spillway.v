@@ -1839,32 +1839,49 @@ Qed.
     - apply Nat.le_max_l.
   Qed.
 
-  (** Assumed: outflow covers worst-case inflow under gate-bounded states. *)
-  Hypothesis outflow_ge_inflow_hyp :
-    forall st tstep, gate_ok st ->
-      outflow worst_case_inflow control_concrete st tstep >=
-      inflow_level worst_case_inflow st tstep.
-
-  (** Helper: outflow is at least worst-case inflow when gate >= min_gate_pct. *)
+  (** Helper: outflow is at least worst-case inflow when control capacity at
+      min_gate_pct covers the inflow rate. *)
   Lemma outflow_ge_inflow : forall (st : State) (tstep : nat),
     gate_ok st ->
+    discharge_capacity_cms st * min_gate_pct / 100 >= worst_case_inflow tstep ->
     outflow worst_case_inflow control_concrete st tstep >=
       inflow_level worst_case_inflow st tstep.
   Proof.
-    intros st tstep Hok.
-    apply outflow_ge_inflow_hyp; exact Hok.
+    intros st tstep Hok Hcap.
+    unfold outflow, outflow_rate, available_water.
+    set (ctrl := control_concrete st tstep).
+    assert (Hctrl : ctrl >= min_gate_pct) by (apply control_concrete_ge_min).
+    assert (Hctrl_div : discharge_capacity_cms st * min_gate_pct / 100 <= discharge_capacity_cms st * ctrl / 100).
+    { apply Nat.Div0.div_le_mono.
+      apply Nat.mul_le_mono_l.
+      exact Hctrl. }
+    assert (Hrate_ge : worst_case_inflow tstep <= discharge_capacity_cms st * ctrl / 100).
+    { apply Nat.le_trans with (m := discharge_capacity_cms st * min_gate_pct / 100).
+      - exact Hcap.
+      - exact Hctrl_div. }
+    assert (Hinflow_le_out :
+              inflow_level worst_case_inflow st tstep
+              <= to_level_at (reservoir_level_cm st) (discharge_capacity_cms st * ctrl / 100)).
+    { unfold inflow_level.
+      apply to_level_at_mono.
+      exact Hrate_ge. }
+    assert (Hinflow_le_avail :
+              inflow_level worst_case_inflow st tstep
+              <= available_water worst_case_inflow st tstep) by (unfold available_water; lia).
+    apply Nat.min_glb; assumption.
   Qed.
 
   (** Derived: Level cannot rise when below threshold.
       Since outflow >= inflow, the reservoir level decreases or stays same. *)
   Lemma level_nonincreasing_below_threshold : forall (st : State) (tstep : nat),
     gate_ok st ->
+    discharge_capacity_cms st * min_gate_pct / 100 >= worst_case_inflow tstep ->
     reservoir_level_cm st < threshold_cm ->
     reservoir_level_cm (step worst_case_inflow control_concrete st tstep) <= reservoir_level_cm st.
   Proof.
-    intros st tstep Hok Hbelow.
+    intros st tstep Hok Hcap Hbelow.
     unfold step. simpl.
-    pose proof (@outflow_ge_inflow st tstep Hok) as Hge.
+    pose proof (@outflow_ge_inflow st tstep Hok Hcap) as Hge.
     lia.
   Qed.
 
@@ -1872,11 +1889,12 @@ Qed.
       This follows from level_nonincreasing_below_threshold. *)
   Lemma no_threshold_crossing : forall (st : State) (tstep : nat),
     gate_ok st ->
+    discharge_capacity_cms st * min_gate_pct / 100 >= worst_case_inflow tstep ->
     reservoir_level_cm st < threshold_cm ->
     reservoir_level_cm (step worst_case_inflow control_concrete st tstep) < threshold_cm.
   Proof.
-    intros st tstep Hok Hbelow.
-    pose proof (@level_nonincreasing_below_threshold st tstep Hok Hbelow) as Hle.
+    intros st tstep Hok Hcap Hbelow.
+    pose proof (@level_nonincreasing_below_threshold st tstep Hok Hcap Hbelow) as Hle.
     lia.
   Qed.
 
@@ -1884,9 +1902,10 @@ Qed.
       the new state is also adequate. *)
   Lemma step_preserves_adequate : forall s t,
     adequate s ->
+    discharge_capacity_cms s * min_gate_pct / 100 >= worst_case_inflow t ->
     adequate (step worst_case_inflow control_concrete s t).
   Proof.
-    intros s t Hadq.
+    intros s t Hadq Hcap.
     unfold adequate in *.
     destruct Hadq as [[Hres Hstage] [Hok Hgate_adq]].
     split; [|split].
@@ -1910,7 +1929,7 @@ Qed.
       + apply Nat.leb_gt in Hbranch.
         exfalso.
         unfold threshold_cm in Hbranch.
-        pose proof (@no_threshold_crossing s t Hok Hbranch) as Hnocross.
+        pose proof (@no_threshold_crossing s t Hok Hcap Hbranch) as Hnocross.
         unfold threshold_cm in Hnocross, Hlevel.
         unfold step in Hnocross, Hlevel.
         simpl in Hnocross, Hlevel.
@@ -1923,23 +1942,29 @@ Qed.
   (** Concrete run preserves adequate over the horizon. *)
   Lemma run_preserves_adequate : forall h s,
     adequate s ->
+    (forall st t, adequate st ->
+       discharge_capacity_cms st * min_gate_pct / 100 >= worst_case_inflow t) ->
     adequate (run worst_case_inflow control_concrete h s).
   Proof.
-    induction h; intros s Hadq; simpl.
+    induction h; intros s Hadq Hcap_all; simpl.
     - exact Hadq.
     - apply IHh.
-      apply step_preserves_adequate.
-      exact Hadq.
+      + apply step_preserves_adequate.
+        * exact Hadq.
+        * apply Hcap_all; exact Hadq.
+      + exact Hcap_all.
   Qed.
 
   (** Concrete run preserves safety over the horizon. *)
   Lemma run_preserves_safe_concrete : forall h st,
     adequate st ->
+    (forall s t, adequate s ->
+       discharge_capacity_cms s * min_gate_pct / 100 >= worst_case_inflow t) ->
     safe (run worst_case_inflow control_concrete h st).
   Proof.
-    intros h st Hadq.
+    intros h st Hadq Hcap_all.
     assert (Hadq' : adequate (run worst_case_inflow control_concrete h st))
-      by (apply run_preserves_adequate; exact Hadq).
+      by (apply run_preserves_adequate; [exact Hadq|exact Hcap_all]).
     unfold adequate in Hadq'.
     destruct Hadq' as [Hsafe _].
     exact Hsafe.
@@ -1949,11 +1974,12 @@ Qed.
   Corollary concrete_schedule_safe :
     forall s0 horizon,
       adequate s0 ->
+      (forall s t, adequate s ->
+         discharge_capacity_cms s * min_gate_pct / 100 >= worst_case_inflow t) ->
       safe (run worst_case_inflow control_concrete horizon s0).
   Proof.
-    intros s0 horizon Hadq.
-    apply run_preserves_safe_concrete.
-    exact Hadq.
+    intros s0 horizon Hadq Hcap_all.
+    apply run_preserves_safe_concrete; assumption.
   Qed.
 
   (** ---------- LIVENESS PROPERTIES ---------- *)
@@ -1971,22 +1997,24 @@ Qed.
   Corollary concrete_schedule_adequate :
     forall s0 horizon,
       adequate s0 ->
+      (forall s t, adequate s ->
+         discharge_capacity_cms s * min_gate_pct / 100 >= worst_case_inflow t) ->
       adequate (run worst_case_inflow control_concrete horizon s0).
   Proof.
-    intros s0 horizon Hadq.
-    apply run_preserves_adequate.
-    exact Hadq.
+    intros s0 horizon Hadq Hcap_all.
+    apply run_preserves_adequate; assumption.
   Qed.
 
   (** Level never increases because outflow always covers inflow. *)
   Lemma level_nonincreasing : forall st tstep,
     gate_ok st ->
+    discharge_capacity_cms st * min_gate_pct / 100 >= worst_case_inflow tstep ->
     reservoir_level_cm (step worst_case_inflow control_concrete st tstep) <= reservoir_level_cm st.
   Proof.
-    intros st tstep Hok.
+    intros st tstep Hok Hcap.
     unfold step.
     simpl.
-    pose proof (@outflow_ge_inflow st tstep Hok) as Hge.
+    pose proof (@outflow_ge_inflow st tstep Hok Hcap) as Hge.
     lia.
   Qed.
 
@@ -2017,14 +2045,16 @@ Qed.
   (** If starting below threshold, level stays below threshold forever. *)
   Lemma run_stays_below_threshold : forall n s,
     gate_ok s ->
+    (forall st t, discharge_capacity_cms st * min_gate_pct / 100 >= worst_case_inflow t) ->
     reservoir_level_cm s < threshold_cm ->
     reservoir_level_cm (run worst_case_inflow control_concrete n s) < threshold_cm.
   Proof.
-    induction n as [|n IH]; intros s Hok Hbelow.
+    induction n as [|n IH]; intros s Hok Hcap_all Hbelow.
     - simpl. exact Hbelow.
     - simpl. apply IH.
       + apply gate_pct_bounded_concrete. exact Hok.
-      + apply no_threshold_crossing; assumption.
+      + exact Hcap_all.
+      + apply no_threshold_crossing; [exact Hok|apply Hcap_all|exact Hbelow].
   Qed.
 
   (** Gate position at 100% is maintained when above threshold. *)
@@ -2057,6 +2087,7 @@ Qed.
       Uses strong induction on remaining steps to 100. *)
   Lemma gate_reaches_100_above : forall s n,
     gate_ok s ->
+    (forall st t, discharge_capacity_cms st * min_gate_pct / 100 >= worst_case_inflow t) ->
     reservoir_level_cm s >= threshold_cm ->
     gate_open_pct s + n * gate_slew_pct pc >= 100 ->
     gate_open_pct (run worst_case_inflow control_concrete n s) = 100 \/
@@ -2064,25 +2095,27 @@ Qed.
   Proof.
     intros s n.
     revert s.
-    induction n as [|n IH]; intros s Hok Habove Hsum.
+    induction n as [|n IH]; intros s Hok Hcap_all Habove Hsum.
     - simpl in Hsum. simpl. left. unfold gate_ok in Hok. lia.
     - simpl.
       destruct (Nat.eq_dec (gate_open_pct s) 100) as [H100|Hnot100].
       + assert (Hstep_gate := gate_100_maintained s n Habove H100).
         assert (Hstep_ok : gate_ok (step worst_case_inflow control_concrete s n)).
         { unfold gate_ok. rewrite Hstep_gate. lia. }
-        assert (Hstep_level := level_nonincreasing n Hok).
+        assert (Hstep_level := level_nonincreasing n Hok (Hcap_all s n)).
         destruct (Nat.le_gt_cases threshold_cm (reservoir_level_cm (step worst_case_inflow control_concrete s n))) as [Hstill|Hdrop].
         * apply IH.
           { exact Hstep_ok. }
+          { exact Hcap_all. }
           { lia. }
           { rewrite Hstep_gate. simpl. lia. }
         * right. apply run_stays_below_threshold.
           { exact Hstep_ok. }
+          { exact Hcap_all. }
           { lia. }
       + assert (Hlt100' : gate_open_pct s < 100) by (unfold gate_ok in Hok; lia).
         assert (Hstep_gate := gate_increases_step n Hok Habove Hlt100').
-        assert (Hstep_level := level_nonincreasing n Hok).
+        assert (Hstep_level := level_nonincreasing n Hok (Hcap_all s n)).
         destruct (Nat.le_gt_cases 100 (gate_open_pct s + gate_slew_pct pc)) as [Hge100|Hlt100].
         * assert (Hstep_gate' : gate_open_pct (step worst_case_inflow control_concrete s n) = 100).
           { rewrite Hstep_gate. apply Nat.min_l. exact Hge100. }
@@ -2091,10 +2124,12 @@ Qed.
           destruct (Nat.le_gt_cases threshold_cm (reservoir_level_cm (step worst_case_inflow control_concrete s n))) as [Hstill|Hdrop].
           { apply IH.
             - exact Hstep_ok.
+            - exact Hcap_all.
             - lia.
             - rewrite Hstep_gate'. simpl. lia. }
           { right. apply run_stays_below_threshold.
             - exact Hstep_ok.
+            - exact Hcap_all.
             - lia. }
         * assert (Hstep_gate' : gate_open_pct (step worst_case_inflow control_concrete s n) = gate_open_pct s + gate_slew_pct pc).
           { rewrite Hstep_gate. apply Nat.min_r. lia. }
@@ -2103,6 +2138,7 @@ Qed.
           destruct (Nat.le_gt_cases threshold_cm (reservoir_level_cm (step worst_case_inflow control_concrete s n))) as [Hstill|Hdrop].
           { apply IH.
             - exact Hstep_ok.
+            - exact Hcap_all.
             - lia.
             - rewrite Hstep_gate'.
               replace (S n) with (n + 1) in Hsum by lia.
@@ -2111,6 +2147,7 @@ Qed.
               lia. }
           { right. apply run_stays_below_threshold.
             - exact Hstep_ok.
+            - exact Hcap_all.
             - lia. }
   Qed.
 
@@ -2148,14 +2185,16 @@ Qed.
   Lemma reach_adequate_gate_above_threshold :
     forall s n,
       safe s -> gate_ok s ->
+      (forall st t, discharge_capacity_cms st * min_gate_pct / 100 >= worst_case_inflow t) ->
       reservoir_level_cm s >= threshold_cm ->
       n >= ramp_steps ->
       gate_open_pct (run worst_case_inflow control_concrete n s) = 100 \/
       reservoir_level_cm (run worst_case_inflow control_concrete n s) < threshold_cm.
   Proof.
-    intros s n Hsafe Hok Habove Hn.
+    intros s n Hsafe Hok Hcap_all Habove Hn.
     apply gate_reaches_100_above.
     - exact Hok.
+    - exact Hcap_all.
     - exact Habove.
     - pose proof ramp_steps_sufficient as Hramp.
       assert (Hslew_pos := slew_pos).
@@ -2169,13 +2208,14 @@ Qed.
       and downstream stage is bounded by stage model. *)
   Lemma step_safe_from_valid : forall s t,
     safe s -> gate_ok s ->
+    discharge_capacity_cms s * min_gate_pct / 100 >= worst_case_inflow t ->
     safe (step worst_case_inflow control_concrete s t).
   Proof.
-    intros s t Hsafe Hok.
+    intros s t Hsafe Hok Hcap.
     unfold safe, step. simpl.
     set (in_flow := inflow_level worst_case_inflow s t).
     set (out := outflow worst_case_inflow control_concrete s t).
-    pose proof (@outflow_ge_inflow s t Hok) as Hge.
+    pose proof (@outflow_ge_inflow s t Hok Hcap) as Hge.
     pose proof (@inflow_below_margin s t Hsafe) as Hmarg.
     pose proof (margin_le_reservoir) as Hmargin.
     unfold safe in Hsafe. destruct Hsafe as [Hres Hdown].
@@ -2191,22 +2231,25 @@ Qed.
   (** Run preserves safety when starting from valid state. *)
   Lemma run_safe_from_valid : forall n s,
     safe s -> gate_ok s ->
+    (forall st t, discharge_capacity_cms st * min_gate_pct / 100 >= worst_case_inflow t) ->
     safe (run worst_case_inflow control_concrete n s).
   Proof.
-    induction n as [|n IH]; intros s Hsafe Hok.
+    induction n as [|n IH]; intros s Hsafe Hok Hcap_all.
     - simpl. exact Hsafe.
     - simpl. apply IH.
-      + apply step_safe_from_valid; assumption.
+      + apply step_safe_from_valid; [assumption|assumption|apply Hcap_all].
       + apply gate_pct_bounded_concrete. exact Hok.
+      + exact Hcap_all.
   Qed.
 
   (** Any valid state becomes adequate within ramp_steps iterations. *)
   Theorem valid_reaches_adequate :
     forall s,
       safe s -> gate_ok s ->
+      (forall st t, discharge_capacity_cms st * min_gate_pct / 100 >= worst_case_inflow t) ->
       adequate (run worst_case_inflow control_concrete ramp_steps s).
   Proof.
-    intros s Hsafe Hok.
+    intros s Hsafe Hok Hcap_all.
     unfold adequate.
     split; [|split].
     - apply run_safe_from_valid; assumption.
@@ -2221,7 +2264,7 @@ Qed.
       exact Hgate.
     - intro Habove'.
       destruct (Nat.le_gt_cases threshold_cm (reservoir_level_cm s)) as [Habove|Hbelow].
-      + destruct (reach_adequate_gate_above_threshold (n:=ramp_steps) Hsafe Hok Habove ltac:(lia)) as [H100|Hdrop].
+      + destruct (reach_adequate_gate_above_threshold (n:=ramp_steps) Hsafe Hok Hcap_all Habove ltac:(lia)) as [H100|Hdrop].
         * exact H100.
         * lia.
       + assert (Hrun_below : reservoir_level_cm (run worst_case_inflow control_concrete ramp_steps s) < threshold_cm).
@@ -2822,11 +2865,37 @@ Section ProportionalCertified.
     apply Nat.le_max_l.
   Qed.
 
-  (** Assumed: proportional outflow covers worst-case inflow under gate bounds. *)
-  Hypothesis outflow_ge_inflow_prop_hyp :
-    forall st tstep, gate_ok st ->
-      outflow worst_case_inflow control_proportional st tstep >=
+  (** Helper: proportional outflow covers inflow when min gate capacity suffices. *)
+  Lemma outflow_ge_inflow_prop : forall (st : State) (tstep : nat),
+    gate_ok st ->
+    discharge_capacity_cms st * min_gate_pct_prop / 100 >= worst_case_inflow tstep ->
+    outflow worst_case_inflow control_proportional st tstep >=
       inflow_level worst_case_inflow st tstep.
+  Proof.
+    intros st tstep Hok Hcap.
+    unfold outflow, outflow_rate, available_water.
+    set (ctrl := control_proportional st tstep).
+    assert (Hctrl : ctrl >= min_gate_pct_prop) by (apply control_proportional_ge_min).
+    assert (Hctrl_div : discharge_capacity_cms st * min_gate_pct_prop / 100
+                        <= discharge_capacity_cms st * ctrl / 100).
+    { apply Nat.Div0.div_le_mono.
+      apply Nat.mul_le_mono_l.
+      exact Hctrl. }
+    assert (Hrate_ge : worst_case_inflow tstep <= discharge_capacity_cms st * ctrl / 100).
+    { apply Nat.le_trans with (m := discharge_capacity_cms st * min_gate_pct_prop / 100).
+      - exact Hcap.
+      - exact Hctrl_div. }
+    assert (Hinflow_le_out :
+              inflow_level worst_case_inflow st tstep
+              <= to_level_at (reservoir_level_cm st) (discharge_capacity_cms st * ctrl / 100)).
+    { unfold inflow_level.
+      apply to_level_at_mono.
+      exact Hrate_ge. }
+    assert (Hinflow_le_avail :
+              inflow_level worst_case_inflow st tstep
+              <= available_water worst_case_inflow st tstep) by (unfold available_water; lia).
+    apply Nat.min_glb; assumption.
+  Qed.
 
   (** Proportional controller respects actual slew limits. *)
   Lemma control_proportional_slew : forall s t,
@@ -2984,25 +3053,19 @@ Section ProportionalCertified.
     (reservoir_level_cm s >= threshold_prop -> gate_open_pct s + actual_slew_pct >= 100).
 
   (** Outflow is at least worst-case inflow when gate is at min_gate or above. *)
-  Lemma outflow_ge_inflow_prop : forall (st : State) (tstep : nat),
-    gate_ok st ->
-    outflow worst_case_inflow control_proportional st tstep >=
-    inflow_level worst_case_inflow st tstep.
-  Proof.
-    intros st tstep Hok.
-    apply outflow_ge_inflow_prop_hyp; exact Hok.
-  Qed.
+  (** Outflow is at least worst-case inflow when gate is at min_gate or above. *)
 
   (** Level cannot rise when below threshold since outflow >= inflow. *)
   Lemma level_nonincreasing_below_threshold_prop : forall (st : State) (tstep : nat),
     gate_ok st ->
+    discharge_capacity_cms st * min_gate_pct_prop / 100 >= worst_case_inflow tstep ->
     reservoir_level_cm st < threshold_prop ->
     reservoir_level_cm (step worst_case_inflow control_proportional st tstep) <= reservoir_level_cm st.
   Proof.
-    intros st tstep Hok Hbelow.
+    intros st tstep Hok Hcap Hbelow.
     unfold step.
     simpl.
-    pose proof (@outflow_ge_inflow_prop st tstep Hok) as Hge.
+    pose proof (@outflow_ge_inflow_prop st tstep Hok Hcap) as Hge.
     lia.
   Qed.
 
@@ -3010,23 +3073,25 @@ Section ProportionalCertified.
   Lemma no_threshold_crossing_prop :
     forall s t,
       gate_ok s ->
+      discharge_capacity_cms s * min_gate_pct_prop / 100 >= worst_case_inflow t ->
       reservoir_level_cm s < threshold_prop ->
       reservoir_level_cm (step worst_case_inflow control_proportional s t) < threshold_prop.
   Proof.
-    intros s t Hok Hbelow.
-    pose proof (@level_nonincreasing_below_threshold_prop s t Hok Hbelow) as Hle.
+    intros s t Hok Hcap Hbelow.
+    pose proof (@level_nonincreasing_below_threshold_prop s t Hok Hcap Hbelow) as Hle.
     lia.
   Qed.
 
   Lemma reservoir_preserved_prop :
     forall s t, adequate_prop s ->
+      discharge_capacity_cms s * min_gate_pct_prop / 100 >= worst_case_inflow t ->
       reservoir_level_cm s + inflow_level worst_case_inflow s t
         <= outflow worst_case_inflow control_proportional s t + max_reservoir_cm pc.
   Proof.
-    intros s t Hadq.
+    intros s t Hadq Hcap.
     unfold adequate_prop in Hadq.
     destruct Hadq as [[Hres _] [Hgate _]].
-    pose proof (@outflow_ge_inflow_prop s t Hgate) as Hge.
+    pose proof (@outflow_ge_inflow_prop s t Hgate Hcap) as Hge.
     lia.
   Qed.
 
@@ -3038,9 +3103,11 @@ Section ProportionalCertified.
   Qed.
 
   Lemma step_preserves_safe_prop : forall s t,
-    adequate_prop s -> safe (step worst_case_inflow control_proportional s t).
+    adequate_prop s ->
+    discharge_capacity_cms s * min_gate_pct_prop / 100 >= worst_case_inflow t ->
+    safe (step worst_case_inflow control_proportional s t).
   Proof.
-    intros s t Hadq.
+    intros s t Hadq Hcap.
     assert (Hadq_copy := Hadq).
     destruct Hadq as [[Hres Hstage] [Hgate _]].
     unfold safe, step.
@@ -3048,7 +3115,7 @@ Section ProportionalCertified.
     set (qin := inflow_level worst_case_inflow s t).
     set (out := outflow worst_case_inflow control_proportional s t).
     assert (Hres_bound : reservoir_level_cm s + qin <= out + max_reservoir_cm pc)
-      by (apply reservoir_preserved_prop; exact Hadq_copy).
+      by (apply reservoir_preserved_prop; [exact Hadq_copy|exact Hcap]).
     split.
     - apply sub_le_from_bound.
       exact Hres_bound.
@@ -3066,15 +3133,18 @@ Section ProportionalCertified.
   Qed.
 
   Lemma step_preserves_adequate_prop : forall s t,
-    adequate_prop s -> adequate_prop (step worst_case_inflow control_proportional s t).
+    adequate_prop s ->
+    discharge_capacity_cms s * min_gate_pct_prop / 100 >= worst_case_inflow t ->
+    adequate_prop (step worst_case_inflow control_proportional s t).
   Proof.
-    intros s t Hadq.
+    intros s t Hadq Hcap.
     unfold adequate_prop in *.
     destruct Hadq as [[Hres Hstage] [Hgate Hslew_cond]].
     split; [|split].
     - apply step_preserves_safe_prop.
       unfold adequate_prop.
       split; [split; assumption|split; assumption].
+      exact Hcap.
     - apply step_preserves_gate_prop.
       exact Hgate.
     - intro Hlevel.
@@ -3086,7 +3156,7 @@ Section ProportionalCertified.
       destruct (Nat.lt_ge_cases (reservoir_level_cm s) threshold_prop) as [Hlow|Hhigh].
       + exfalso.
         assert (Hnocross : reservoir_level_cm (step worst_case_inflow control_proportional s t) < threshold_prop).
-        { apply no_threshold_crossing_prop; [exact Hgate | exact Hlow]. }
+        { apply no_threshold_crossing_prop; [exact Hgate | exact Hcap | exact Hlow]. }
         unfold step in Hnocross.
         simpl in Hnocross.
         lia.
@@ -3107,22 +3177,30 @@ Section ProportionalCertified.
   Qed.
 
   Lemma run_preserves_adequate_prop : forall h s,
-    adequate_prop s -> adequate_prop (run worst_case_inflow control_proportional h s).
+    adequate_prop s ->
+    (forall st t, adequate_prop st ->
+       discharge_capacity_cms st * min_gate_pct_prop / 100 >= worst_case_inflow t) ->
+    adequate_prop (run worst_case_inflow control_proportional h s).
   Proof.
-    induction h as [|h IH]; intros s Hadq.
+    induction h as [|h IH]; intros s Hadq Hcap_all.
     - exact Hadq.
     - simpl.
       apply IH.
-      apply step_preserves_adequate_prop.
-      exact Hadq.
+      + apply step_preserves_adequate_prop.
+        * exact Hadq.
+        * apply Hcap_all; exact Hadq.
+      + exact Hcap_all.
   Qed.
 
   Lemma run_preserves_safe_prop : forall h s,
-    adequate_prop s -> safe (run worst_case_inflow control_proportional h s).
+    adequate_prop s ->
+    (forall st t, adequate_prop st ->
+       discharge_capacity_cms st * min_gate_pct_prop / 100 >= worst_case_inflow t) ->
+    safe (run worst_case_inflow control_proportional h s).
   Proof.
-    intros h s Hadq.
+    intros h s Hadq Hcap_all.
     assert (Hadq' : adequate_prop (run worst_case_inflow control_proportional h s))
-      by (apply run_preserves_adequate_prop; exact Hadq).
+      by (apply run_preserves_adequate_prop; [exact Hadq|exact Hcap_all]).
     unfold adequate_prop in Hadq'.
     destruct Hadq' as [Hsafe _].
     exact Hsafe.
@@ -3131,18 +3209,22 @@ Section ProportionalCertified.
   Theorem proportional_schedule_safe :
     forall s0 horizon,
       adequate_prop s0 ->
+      (forall s t, adequate_prop s ->
+         discharge_capacity_cms s * min_gate_pct_prop / 100 >= worst_case_inflow t) ->
       safe (run worst_case_inflow control_proportional horizon s0).
   Proof.
-    intros.
+    intros s0 horizon Hadq Hcap_all.
     apply run_preserves_safe_prop; assumption.
   Qed.
 
   Theorem proportional_schedule_adequate :
     forall s0 horizon,
       adequate_prop s0 ->
+      (forall s t, adequate_prop s ->
+         discharge_capacity_cms s * min_gate_pct_prop / 100 >= worst_case_inflow t) ->
       adequate_prop (run worst_case_inflow control_proportional horizon s0).
   Proof.
-    intros.
+    intros s0 horizon Hadq Hcap_all.
     apply run_preserves_adequate_prop; assumption.
   Qed.
 
@@ -3209,24 +3291,26 @@ Section ProportionalCertified.
   Lemma outflow_exceeds_inflow :
     forall s t,
       gate_ok s ->
+      discharge_capacity_cms s * min_gate_pct_prop / 100 >= worst_case_inflow t ->
       outflow worst_case_inflow control_proportional s t >=
       inflow_level worst_case_inflow s t.
   Proof.
-    intros s t Hgate.
-    apply outflow_ge_inflow_prop; exact Hgate.
+    intros s t Hgate Hcap.
+    apply outflow_ge_inflow_prop; [exact Hgate|exact Hcap].
   Qed.
 
   Lemma level_nonincreasing_above_setpoint :
     forall s t,
       adequate_prop s ->
+      discharge_capacity_cms s * min_gate_pct_prop / 100 >= worst_case_inflow t ->
       reservoir_level_cm s >= setpoint_cm ->
       reservoir_level_cm (step worst_case_inflow control_proportional s t) <= reservoir_level_cm s.
   Proof.
-    intros s t Hadq Habove.
+    intros s t Hadq Hcap Habove.
     unfold adequate_prop in Hadq. destruct Hadq as [[_ _] [Hgate _]].
     assert (Hout : outflow worst_case_inflow control_proportional s t >=
                    inflow_level worst_case_inflow s t).
-    { apply outflow_exceeds_inflow. exact Hgate. }
+    { apply outflow_exceeds_inflow; [exact Hgate|exact Hcap]. }
     unfold step. simpl.
     lia.
   Qed.
@@ -3234,13 +3318,14 @@ Section ProportionalCertified.
   Lemma lyapunov_nonincreasing_no_cross :
     forall s t,
       adequate_prop s ->
+      discharge_capacity_cms s * min_gate_pct_prop / 100 >= worst_case_inflow t ->
       reservoir_level_cm s > setpoint_cm ->
       reservoir_level_cm (step worst_case_inflow control_proportional s t) >= setpoint_cm ->
       lyapunov (step worst_case_inflow control_proportional s t) <= lyapunov s.
   Proof.
-    intros s t Hadq Habove Hnocross.
+    intros s t Hadq Hcap Habove Hnocross.
     assert (Hlevel : reservoir_level_cm (step worst_case_inflow control_proportional s t) <= reservoir_level_cm s).
-    { apply level_nonincreasing_above_setpoint. exact Hadq. lia. }
+    { apply level_nonincreasing_above_setpoint; [exact Hadq|exact Hcap|lia]. }
     unfold lyapunov.
     destruct (Nat.leb (reservoir_level_cm s) setpoint_cm) eqn:Hs.
     - apply Nat.leb_le in Hs. lia.
@@ -3252,13 +3337,15 @@ Section ProportionalCertified.
   Theorem lyapunov_stability :
     forall s t,
       adequate_prop s ->
+      discharge_capacity_cms s * min_gate_pct_prop / 100 >= worst_case_inflow t ->
       above_deadband s ->
       reservoir_level_cm (step worst_case_inflow control_proportional s t) >= setpoint_cm ->
       lyapunov (step worst_case_inflow control_proportional s t) <= lyapunov s.
   Proof.
-    intros s t Hadq Hab Hnocross.
+    intros s t Hadq Hcap Hab Hnocross.
     apply lyapunov_nonincreasing_no_cross.
     - exact Hadq.
+    - exact Hcap.
     - unfold above_deadband in Hab. lia.
     - exact Hnocross.
   Qed.
@@ -3316,11 +3403,28 @@ Section RatingTableCertified.
     then 100
     else Nat.min 100 (Nat.max 0 (gate_open_pct s - gate_slew_pct pc)).
 
-  (** Assumed: table-based outflow covers inflow at safe states. *)
-  Hypothesis outflow_ge_inflow_table :
+  (** Helper: table-based outflow covers inflow when capacity suffices. *)
+  Lemma outflow_ge_inflow_table :
     forall s t, safe s ->
+      discharge_capacity_cms s * control_table s t / 100 >= worst_case_inflow t ->
       outflow worst_case_inflow control_table s t >=
       inflow_level worst_case_inflow s t.
+  Proof.
+    intros s t Hsafe Hcap.
+    unfold outflow, outflow_rate, available_water.
+    set (ctrl := control_table s t).
+    assert (Hrate_ge : worst_case_inflow t <= discharge_capacity_cms s * ctrl / 100) by exact Hcap.
+    assert (Hinflow_le_out :
+              inflow_level worst_case_inflow s t
+              <= to_level_at (reservoir_level_cm s) (discharge_capacity_cms s * ctrl / 100)).
+    { unfold inflow_level.
+      apply to_level_at_mono.
+      exact Hrate_ge. }
+    assert (Hinflow_le_avail :
+              inflow_level worst_case_inflow s t
+              <= available_water worst_case_inflow s t) by (unfold available_water; lia).
+    apply Nat.min_glb; assumption.
+  Qed.
 
   (** Controller output is bounded by 100%. *)
   Lemma control_table_within : forall s t, control_table s t <= 100.
@@ -3334,11 +3438,12 @@ Section RatingTableCertified.
   Lemma reservoir_preserved_table
     : forall s t,
       safe s ->
+      discharge_capacity_cms s * control_table s t / 100 >= worst_case_inflow t ->
       reservoir_level_cm s + inflow_level worst_case_inflow s t
         <= outflow worst_case_inflow control_table s t + max_reservoir_cm pc.
   Proof.
-    intros s t Hsafe.
-    pose proof (@outflow_ge_inflow_table s t Hsafe) as Hge.
+    intros s t Hsafe Hcap.
+    pose proof (@outflow_ge_inflow_table s t Hsafe Hcap) as Hge.
     destruct Hsafe as [Hres _].
     lia.
   Qed.
@@ -3374,23 +3479,33 @@ Section RatingTableCertified.
   Qed.
 
   (** One table-based step preserves reservoir and stage safety. *)
-  Lemma step_preserves_safe_table : forall s t, safe s -> safe (step worst_case_inflow control_table s t).
+  Lemma step_preserves_safe_table : forall s t, safe s ->
+    discharge_capacity_cms s * control_table s t / 100 >= worst_case_inflow t ->
+    safe (step worst_case_inflow control_table s t).
   Proof.
-    intros s t Hs. unfold safe in *. destruct Hs as [Hres Hstage].
+    intros s t Hs Hcap. unfold safe in *. destruct Hs as [Hres Hstage].
     unfold step. simpl.
     set (inflow := inflow_level worst_case_inflow s t).
     set (out := outflow worst_case_inflow control_table s t).
     assert (Hres_bound : reservoir_level_cm s + inflow <= out + max_reservoir_cm pc)
-      by (apply reservoir_preserved_table; split; assumption).
+      by (apply reservoir_preserved_table; [split; assumption|exact Hcap]).
     split.
     - apply sub_le_from_bound; assumption.
     - apply stage_bounded_table.
   Qed.
 
   (** Table-based run preserves safety over the horizon. *)
-  Lemma run_preserves_safe_table : forall h s, safe s -> safe (run worst_case_inflow control_table h s).
+  Lemma run_preserves_safe_table : forall h s,
+    safe s ->
+    (forall st t, safe st ->
+       discharge_capacity_cms st * control_table st t / 100 >= worst_case_inflow t) ->
+    safe (run worst_case_inflow control_table h s).
   Proof.
-    induction h; intros; simpl; [assumption|apply IHh, step_preserves_safe_table; assumption].
+    induction h; intros s Hsafe Hcap_all; simpl.
+    - exact Hsafe.
+    - apply IHh.
+      + apply step_preserves_safe_table; [exact Hsafe|apply Hcap_all; exact Hsafe].
+      + exact Hcap_all.
   Qed.
 
   (** Gate remains within 0–100% after a table-based step. *)
@@ -3398,35 +3513,51 @@ Section RatingTableCertified.
   Proof. intros; unfold step; simpl; apply control_table_within. Qed.
 
   (** One table-based step preserves validity. *)
-  Lemma step_preserves_valid_table : forall s t, valid s -> valid (step worst_case_inflow control_table s t).
+  Lemma step_preserves_valid_table : forall s t, valid s ->
+    discharge_capacity_cms s * control_table s t / 100 >= worst_case_inflow t ->
+    valid (step worst_case_inflow control_table s t).
   Proof.
-    intros s t [Hs Hg]. split.
-    - apply step_preserves_safe_table; auto.
+    intros s t [Hs Hg] Hcap. split.
+    - apply step_preserves_safe_table; [exact Hs|exact Hcap].
     - apply gate_pct_bounded_table.
   Qed.
 
   (** Table-based run preserves validity over the horizon. *)
-  Lemma run_preserves_valid_table : forall h s, valid s -> valid (run worst_case_inflow control_table h s).
+  Lemma run_preserves_valid_table : forall h s, valid s ->
+    (forall st t, safe st ->
+       discharge_capacity_cms st * control_table st t / 100 >= worst_case_inflow t) ->
+    valid (run worst_case_inflow control_table h s).
   Proof.
-    induction h; intros; simpl; [assumption|apply IHh, step_preserves_valid_table; assumption].
+    induction h; intros s Hvalid Hcap_all; simpl.
+    - exact Hvalid.
+    - apply IHh.
+      + apply step_preserves_valid_table; [exact Hvalid|].
+        destruct Hvalid as [Hs _]. apply Hcap_all; exact Hs.
+      + exact Hcap_all.
   Qed.
 
   (** Horizon safety guarantee for the rating-table controller. *)
   Corollary rating_schedule_safe :
     forall s0 horizon,
       safe s0 ->
+      (forall s t, safe s ->
+         discharge_capacity_cms s * control_table s t / 100 >= worst_case_inflow t) ->
       safe (run worst_case_inflow control_table horizon s0).
   Proof.
-    intros s0 horizon Hsafe. now apply run_preserves_safe_table.
+    intros s0 horizon Hsafe Hcap_all.
+    apply run_preserves_safe_table; assumption.
   Qed.
 
   (** Horizon validity guarantee for the rating-table controller. *)
   Corollary rating_schedule_valid :
     forall s0 horizon,
       valid s0 ->
+      (forall s t, safe s ->
+         discharge_capacity_cms s * control_table s t / 100 >= worst_case_inflow t) ->
       valid (run worst_case_inflow control_table horizon s0).
   Proof.
-    intros s0 horizon Hvalid. now apply run_preserves_valid_table.
+    intros s0 horizon Hvalid Hcap_all.
+    apply run_preserves_valid_table; assumption.
   Qed.
 
 End RatingTableCertified.
@@ -3509,10 +3640,18 @@ Section MultiGate.
     let gs := control_mg s t in
     Nat.min (outflow_capacity_mg gs) (available_water worst_case_inflow s t).
 
-  (** Assumed: aggregate outflow covers inflow level at safe states. *)
-  Hypothesis outflow_ge_inflow_mg :
+  (** Helper: aggregate outflow covers inflow when aggregate capacity suffices. *)
+  Lemma outflow_ge_inflow_mg :
     forall s t, safe s ->
+      outflow_capacity_mg (control_mg s t) >= inflow_level worst_case_inflow s t ->
       outflow_mg s t >= inflow_level worst_case_inflow s t.
+  Proof.
+    intros s t _ Hcap.
+    unfold outflow_mg.
+    apply Nat.min_glb.
+    - exact Hcap.
+    - unfold available_water. lia.
+  Qed.
 
   (** Multi-gate plant step with aggregate discharge.
       Note: gate_open_pct stores the average gate position for monitoring.
@@ -3654,10 +3793,12 @@ Section MultiGate.
             (available_water worst_case_inflow s t).
 
   (** One multi-gate step preserves reservoir and stage safety. *)
-  Lemma step_mg_preserves_safe : forall s t, safe s -> safe (step_mg s t).
+  Lemma step_mg_preserves_safe : forall s t, safe s ->
+    outflow_capacity_mg (control_mg s t) >= inflow_level worst_case_inflow s t ->
+    safe (step_mg s t).
   Proof.
-    intros s t Hsafe. unfold safe in *.
-    pose proof (@outflow_ge_inflow_mg s t Hsafe) as Hout_ge_inflow.
+    intros s t Hsafe Hcap. unfold safe in *.
+    pose proof (@outflow_ge_inflow_mg s t Hsafe Hcap) as Hout_ge_inflow.
     destruct Hsafe as [Hres _].
     unfold step_mg. simpl.
     set (out := outflow_mg s t).
@@ -3670,10 +3811,12 @@ Section MultiGate.
   Qed.
 
   (** One multi-gate step preserves validity. *)
-  Lemma step_mg_preserves_valid : forall s t, valid s -> valid (step_mg s t).
+  Lemma step_mg_preserves_valid : forall s t, valid s ->
+    outflow_capacity_mg (control_mg s t) >= inflow_level worst_case_inflow s t ->
+    valid (step_mg s t).
   Proof.
-    intros s t [Hsafe Hgate]. split.
-    - apply step_mg_preserves_safe; assumption.
+    intros s t [Hsafe Hgate] Hcap. split.
+    - apply step_mg_preserves_safe; [exact Hsafe|exact Hcap].
     - unfold step_mg. simpl.
       destruct (control_mg_within_bounds s t) as [Hlen Hforall].
       assert (Hsum : sum_gate_pct (control_mg s t) <= 100 * gate_count)
@@ -3684,16 +3827,25 @@ Section MultiGate.
   Qed.
 
   (** Multi-gate run preserves validity over the horizon. *)
-  Lemma run_mg_preserves_valid : forall h s, valid s -> valid (run_mg h s).
+  Lemma run_mg_preserves_valid : forall h s, valid s ->
+    (forall st t, safe st ->
+       outflow_capacity_mg (control_mg st t) >= inflow_level worst_case_inflow st t) ->
+    valid (run_mg h s).
   Proof.
-    induction h as [|h IH]; intros s Hvalid.
+    induction h as [|h IH]; intros s Hvalid Hcap_all.
     - exact Hvalid.
-    - simpl. apply IH. apply step_mg_preserves_valid; assumption.
+    - simpl. apply IH.
+      + apply step_mg_preserves_valid; [exact Hvalid|].
+        destruct Hvalid as [Hs _]. apply Hcap_all; exact Hs.
+      + exact Hcap_all.
   Qed.
 
   (** Horizon validity guarantee for the multi-gate controller. *)
   Theorem schedule_valid_mg :
-    forall s0 horizon, valid s0 -> valid (run_mg horizon s0).
+    forall s0 horizon, valid s0 ->
+      (forall s t, safe s ->
+         outflow_capacity_mg (control_mg s t) >= inflow_level worst_case_inflow s t) ->
+      valid (run_mg horizon s0).
   Proof. intros; eapply run_mg_preserves_valid; eauto. Qed.
 
 End MultiGate.
@@ -3763,10 +3915,18 @@ Section OperatorOverride.
     Nat.min (gate_capacity_cm pc * control_override s t / 100)
             (available_water worst_case_inflow s t).
 
-  (** Assumed: override outflow covers inflow level. *)
-  Hypothesis outflow_ge_inflow_override :
+  (** Helper: override outflow covers inflow when capacity suffices. *)
+  Lemma outflow_ge_inflow_override :
     forall s t,
+      gate_capacity_cm pc * control_override s t / 100 >= inflow_level worst_case_inflow s t ->
       outflow_override s t >= inflow_level worst_case_inflow s t.
+  Proof.
+    intros s t Hcap.
+    unfold outflow_override.
+    apply Nat.min_glb.
+    - exact Hcap.
+    - unfold available_water. lia.
+  Qed.
 
   (** Step function with override controller. *)
   Definition step_override (s : State) (t : nat) : State :=
@@ -3833,11 +3993,12 @@ Section OperatorOverride.
   Lemma reservoir_preserved_override :
     forall s t,
       reservoir_level_cm s <= max_reservoir_cm pc ->
+      gate_capacity_cm pc * control_override s t / 100 >= inflow_level worst_case_inflow s t ->
       reservoir_level_cm s + inflow_level worst_case_inflow s t
         <= outflow_override s t + max_reservoir_cm pc.
   Proof.
-    intros s t Hres.
-    pose proof (outflow_ge_inflow_override s t) as Hge.
+    intros s t Hres Hcap.
+    pose proof (outflow_ge_inflow_override s t Hcap) as Hge.
     lia.
   Qed.
 
@@ -3854,22 +4015,26 @@ Section OperatorOverride.
   Lemma step_override_reservoir_safe :
     forall s t,
       reservoir_level_cm s <= max_reservoir_cm pc ->
+      gate_capacity_cm pc * control_override s t / 100 >= inflow_level worst_case_inflow s t ->
       reservoir_level_cm (step_override s t) <= max_reservoir_cm pc.
   Proof.
-    intros s t Hres.
+    intros s t Hres Hcap.
     unfold step_override. simpl.
     apply sub_le_from_bound.
     apply reservoir_preserved_override.
-    exact Hres.
+    - exact Hres.
+    - exact Hcap.
   Qed.
 
   (** Safety preserved by step. *)
   Lemma step_override_preserves_safe :
-    forall s t, safe s -> safe (step_override s t).
+    forall s t, safe s ->
+      gate_capacity_cm pc * control_override s t / 100 >= inflow_level worst_case_inflow s t ->
+      safe (step_override s t).
   Proof.
-    intros s t [Hres Hdown].
+    intros s t [Hres Hdown] Hcap.
     unfold safe. split.
-    - apply step_override_reservoir_safe. exact Hres.
+    - apply step_override_reservoir_safe; [exact Hres|exact Hcap].
     - apply step_override_downstream_safe.
   Qed.
 
@@ -3884,38 +4049,57 @@ Section OperatorOverride.
 
   (** Validity preserved by step. *)
   Lemma step_override_preserves_valid :
-    forall s t, valid s -> valid (step_override s t).
+    forall s t, valid s ->
+      gate_capacity_cm pc * control_override s t / 100 >= inflow_level worst_case_inflow s t ->
+      valid (step_override s t).
   Proof.
-    intros s t [Hsafe Hgate].
+    intros s t [Hsafe Hgate] Hcap.
     unfold valid. split.
-    - apply step_override_preserves_safe. exact Hsafe.
+    - apply step_override_preserves_safe; [exact Hsafe|exact Hcap].
     - apply step_override_preserves_gate_ok.
   Qed.
 
   (** Safety preserved across horizon. *)
   Lemma run_override_preserves_safe :
-    forall h s, safe s -> safe (run_override h s).
+    forall h s, safe s ->
+      (forall st t, safe st ->
+         gate_capacity_cm pc * control_override st t / 100 >= inflow_level worst_case_inflow st t) ->
+      safe (run_override h s).
   Proof.
-    induction h; intros s Hsafe.
+    induction h; intros s Hsafe Hcap_all.
     - exact Hsafe.
-    - simpl. apply IHh. apply step_override_preserves_safe. exact Hsafe.
+    - simpl. apply IHh.
+      + apply step_override_preserves_safe; [exact Hsafe|apply Hcap_all; exact Hsafe].
+      + exact Hcap_all.
   Qed.
 
   (** Validity preserved across horizon. *)
   Lemma run_override_preserves_valid :
-    forall h s, valid s -> valid (run_override h s).
+    forall h s, valid s ->
+      (forall st t, safe st ->
+         gate_capacity_cm pc * control_override st t / 100 >= inflow_level worst_case_inflow st t) ->
+      valid (run_override h s).
   Proof.
-    induction h; intros s Hvalid.
+    induction h; intros s Hvalid Hcap_all.
     - exact Hvalid.
-    - simpl. apply IHh. apply step_override_preserves_valid. exact Hvalid.
+    - simpl. apply IHh.
+      + apply step_override_preserves_valid; [exact Hvalid|].
+        destruct Hvalid as [Hs _]. apply Hcap_all; exact Hs.
+      + exact Hcap_all.
   Qed.
 
   Theorem schedule_safe_override :
-    forall s0 horizon, safe s0 -> safe (run_override horizon s0).
+    forall s0 horizon, safe s0 ->
+      (forall s t, safe s ->
+         gate_capacity_cm pc * control_override s t / 100 >= inflow_level worst_case_inflow s t) ->
+      safe (run_override horizon s0).
   Proof. intros; apply run_override_preserves_safe; assumption. Qed.
 
   Theorem schedule_valid_override :
-    forall s0 horizon, valid s0 -> valid (run_override horizon s0).
+    forall s0 horizon, valid s0 ->
+      (forall s t, safe s ->
+         gate_capacity_cm pc * control_override s t / 100 >= inflow_level worst_case_inflow s t) ->
+      valid (run_override horizon s0).
   Proof. intros; apply run_override_preserves_valid; assumption. Qed.
 
 End OperatorOverride.
